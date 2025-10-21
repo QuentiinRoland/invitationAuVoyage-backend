@@ -219,10 +219,17 @@ class GrapesJSPDFGenerator(APIView):
     /* Configuration de la page pour WeasyPrint - MULTI-PAGES */
     @page {{
       size: A4;
-      margin-top: 4cm;
+      margin-top: 3.5cm;
       margin-bottom: 1.5cm;
       margin-left: 1.5cm;
       margin-right: 1.5cm;
+      
+      /* Bloc de marge supérieur pour le header/logo */
+      @top-center {{
+        content: "";
+        width: 100%;
+        height: 3cm;
+      }}
     }}
     
     body {{
@@ -240,7 +247,7 @@ class GrapesJSPDFGenerator(APIView):
     /* CSS GrapesJS nettoyé */
     {clean_css}
 
-    /* Conteneur principal - MULTI-PAGES */
+    /* Conteneur principal - MULTI-PAGES avec background qui ne bouge pas */
     .grapesjs-content {{
       width: 100%;
       overflow: hidden;
