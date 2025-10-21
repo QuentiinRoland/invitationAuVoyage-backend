@@ -25,6 +25,52 @@ from .models import Document, DocumentAsset, Folder
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
+
+class APIRootView(APIView):
+    """
+    Vue racine de l'API - Liste tous les endpoints disponibles
+    """
+    permission_classes = [AllowAny]
+    
+    def get(self, request):
+        return Response({
+            "message": "Bienvenue sur l'API Invitation au Voyage",
+            "version": "1.0.0",
+            "status": "online",
+            "endpoints": {
+                "authentification": {
+                    "register": "/api/auth/register/",
+                    "login": "/api/auth/login/",
+                    "logout": "/api/auth/logout/",
+                    "profile": "/api/auth/profile/",
+                    "check": "/api/auth/check/",
+                    "password_reset": "/api/auth/password-reset/",
+                    "password_reset_confirm": "/api/auth/password-reset-confirm/",
+                },
+                "offres": {
+                    "generate_offer": "/api/generate-offer/",
+                    "generate_pdf_offer": "/api/generate-pdf-offer/",
+                    "improve_offer": "/api/improve-offer/",
+                    "grapesjs_pdf_generator": "/api/grapesjs-pdf-generator/",
+                    "pdf_to_gjs": "/api/pdf-to-gjs/",
+                },
+                "documents": {
+                    "list_create": "/api/documents/",
+                    "without_folder": "/api/documents/without-folder/",
+                    "detail": "/api/documents/{id}/",
+                    "generate_pdf": "/api/documents/{id}/generate-pdf/",
+                    "move_to_folder": "/api/documents/{id}/move-to-folder/",
+                },
+                "folders": {
+                    "list_create": "/api/folders/",
+                    "detail": "/api/folders/{id}/",
+                    "documents": "/api/folders/{id}/documents/",
+                },
+                "admin": "/admin/"
+            },
+            "documentation": "https://github.com/QuentiinRoland/invitationAuVoyage-backend"
+        })
+
 # Configuration des APIs d'images
 UNSPLASH_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 BING_KEY = os.getenv("BING_IMAGE_SUBSCRIPTION_KEY")

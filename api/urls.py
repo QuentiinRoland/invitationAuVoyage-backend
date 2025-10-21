@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint, ImproveOfferEndpoint,
+    APIRootView, TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint, ImproveOfferEndpoint,
     DocumentGeneratePDFView, PDFOfferGenerator
 )
 from .auth_views import (
@@ -13,6 +13,9 @@ from .document_views import (
 )
 
 urlpatterns = [
+    # Page d'accueil de l'API
+    path("", APIRootView.as_view(), name="api-root"),
+    
     # Authentification
     path("auth/register/", RegisterView.as_view(), name="auth-register"),
     path("auth/login/", LoginView.as_view(), name="auth-login"),
