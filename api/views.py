@@ -219,7 +219,10 @@ class GrapesJSPDFGenerator(APIView):
     /* Configuration de la page pour WeasyPrint - CHAQUE PAGE */
     @page {{
       size: A4;
-      margin: 1cm 1.5cm;
+      margin-top: 4.5cm;
+      margin-bottom: 1cm;
+      margin-left: 1.5cm;
+      margin-right: 1.5cm;
     }}
     
     body {{
@@ -237,12 +240,16 @@ class GrapesJSPDFGenerator(APIView):
     /* CSS GrapesJS nettoyé */
     {clean_css}
 
-    /* Conteneur principal - padding-top pour descendre le TEXTE uniquement */
+    /* Conteneur principal */
     .grapesjs-content {{
       width: 100%;
-      overflow: hidden;
+      overflow: visible;
       position: relative;
-      padding-top: 140px;
+    }}
+    
+    /* Les éléments avec background doivent remonter dans la marge */
+    .grapesjs-content > *:first-child {{
+      margin-top: -3cm;
     }}
 
     /* Sections compactes */
