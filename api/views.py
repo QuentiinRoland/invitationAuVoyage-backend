@@ -243,6 +243,7 @@ class GrapesJSPDFGenerator(APIView):
       overflow: hidden;
       position: relative;
       page-break-inside: avoid;
+      padding-top: 120px;
     }}
 
     /* Sections compactes */
@@ -275,7 +276,7 @@ class GrapesJSPDFGenerator(APIView):
     
     h1 {{ 
       font-size: 16pt;
-      margin-top: 60px;
+      margin-top: 0;
       line-height: 1.2;
     }}
     h2 {{ 
