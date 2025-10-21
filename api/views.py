@@ -216,11 +216,11 @@ class GrapesJSPDFGenerator(APIView):
     /* Reset & base */
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     
-    /* Configuration de la page pour WeasyPrint - CHAQUE PAGE */
+    /* Configuration de la page pour WeasyPrint - MULTI-PAGES */
     @page {{
       size: A4;
-      margin-top: 4.5cm;
-      margin-bottom: 1cm;
+      margin-top: 4cm;
+      margin-bottom: 1.5cm;
       margin-left: 1.5cm;
       margin-right: 1.5cm;
     }}
@@ -240,16 +240,11 @@ class GrapesJSPDFGenerator(APIView):
     /* CSS GrapesJS nettoyé */
     {clean_css}
 
-    /* Conteneur principal */
+    /* Conteneur principal - MULTI-PAGES */
     .grapesjs-content {{
       width: 100%;
-      overflow: visible;
+      overflow: hidden;
       position: relative;
-    }}
-    
-    /* Les éléments avec background doivent remonter dans la marge */
-    .grapesjs-content > *:first-child {{
-      margin-top: -3cm;
     }}
 
     /* Sections compactes */
