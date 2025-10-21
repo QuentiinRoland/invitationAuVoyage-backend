@@ -9,9 +9,9 @@ echo "🚀 Début du build pour Render..."
 echo "📦 Installation des dépendances Python..."
 pip install -r requirements.txt
 
-# Installation de Playwright avec Chromium (nécessite Render Pro pour les droits root)
-echo "🎭 Installation de Playwright avec Chromium..."
-playwright install --with-deps chromium
+# Note : Playwright nécessite Render Pro (droits root)
+# On utilise WeasyPrint pour la génération PDF (fonctionne sur Render Free)
+echo "📄 Utilisation de WeasyPrint pour la génération PDF"
 
 # Collecter les fichiers statiques
 echo "📁 Collection des fichiers statiques..."
