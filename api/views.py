@@ -198,7 +198,7 @@ class GrapesJSPDFGenerator(APIView):
 
     def convert_grapesjs_to_printable_html(self, grapesjs_html: str, grapesjs_css: str, company_info: dict) -> str:
         """
-        Convertit le contenu GrapesJS en HTML imprimable (reprend ton ancienne logique).
+        Convertit le contenu GrapesJS en HTML imprimable optimisé pour WeasyPrint.
         """
         company_name  = company_info.get('name', 'Votre Entreprise')
         clean_html    = self.clean_grapesjs_html(grapesjs_html)
@@ -206,7 +206,7 @@ class GrapesJSPDFGenerator(APIView):
         current_date  = datetime.now().strftime("%d/%m/%Y à %H:%M")
         footer_html   = self.generate_footer(company_info, current_date)
 
-        # Page HTML complète avec le CSS embarqué
+        # Page HTML complète avec le CSS embarqué optimisé pour WeasyPrint
         return f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -215,50 +215,100 @@ class GrapesJSPDFGenerator(APIView):
   <style>
     /* Reset & base */
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    
+    /* Configuration de la page pour WeasyPrint */
+    @page {{
+      size: A4;
+      margin: 1.5cm 2cm;
+    }}
+    
     body {{
-      font-family: Arial, sans-serif;
-      line-height: 1.6;
+      font-family: Arial, Helvetica, sans-serif;
+      line-height: 1.5;
       color: #333;
       background: white;
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 20px;
-    }}
-
-    /* Impression */
-    @page {{ margin: 2cm; size: A4; }}
-    @media print {{
-      body {{ margin: 0; padding: 15px; max-width: 100%; }}
-      .no-print {{ display: none !important; }}
-      .page-break {{ page-break-before: always; }}
-      .avoid-break {{ page-break-inside: avoid; }}
-      * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+      width: 100%;
+      max-width: 100%;
+      padding: 0;
+      margin: 0;
+      font-size: 11pt;
     }}
 
     /* CSS GrapesJS nettoyé */
     {clean_css}
 
-    /* Améliorations sections */
+    /* Améliorations sections - compatible WeasyPrint */
     .flight-section, .hotel-section, .price-section {{
+      page-break-inside: avoid;
+      margin-bottom: 20px;
+      padding: 15px;
+      border-radius: 5px;
+    }}
+    
+    .cta-section {{
+      page-break-inside: avoid;
+      margin: 20px 0;
+      padding: 20px;
+      border-radius: 5px;
+    }}
+    
+    .offer-header {{
       page-break-inside: avoid;
       margin-bottom: 25px;
       padding: 20px;
-      border-radius: 8px;
+      border-radius: 5px;
     }}
-    .cta-section {{
+    
+    /* Titres */
+    h1, h2, h3 {{ 
+      page-break-after: avoid;
       page-break-inside: avoid;
-      margin: 25px 0;
-      padding: 25px;
-      border-radius: 8px;
+      margin-bottom: 12px;
+      margin-top: 15px;
     }}
-    .offer-header {{
+    
+    h1 {{ font-size: 20pt; }}
+    h2 {{ font-size: 16pt; }}
+    h3 {{ font-size: 13pt; }}
+    
+    /* Paragraphes */
+    p {{
+      margin-bottom: 10px;
+      line-height: 1.6;
+      orphans: 3;
+      widows: 3;
+    }}
+    
+    /* Images - compatible WeasyPrint */
+    img {{
+      max-width: 100%;
+      height: auto;
+      display: block;
       page-break-inside: avoid;
-      margin-bottom: 30px;
-      padding: 30px;
-      border-radius: 8px;
     }}
-    h1, h2, h3 {{ page-break-after: avoid; margin-bottom: 15px; }}
-    img {{ max-width: 100%; height: auto; }}
+    
+    /* Conteneur principal */
+    .grapesjs-content {{
+      width: 100%;
+      overflow: hidden;
+    }}
+    
+    /* Empêcher les débordements */
+    * {{
+      max-width: 100%;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }}
+    
+    /* Listes */
+    ul, ol {{
+      margin-bottom: 10px;
+      padding-left: 25px;
+    }}
+    
+    li {{
+      margin-bottom: 5px;
+    }}
   </style>
 </head>
 <body>
@@ -271,23 +321,84 @@ class GrapesJSPDFGenerator(APIView):
 </html>"""
 
     def clean_grapesjs_html(self, html: str) -> str:
-        """Nettoie le HTML de GrapesJS pour l'impression (reprend tes regex)."""
+        """Nettoie le HTML de GrapesJS pour l'impression avec WeasyPrint."""
         if not html:
             return ""
+        
+        # Supprimer les attributs GrapesJS
         html = re.sub(r'data-gjs-[^=]*="[^"]*"', '', html)
         html = re.sub(r'contenteditable="[^"]*"', '', html)
         html = re.sub(r'spellcheck="[^"]*"', '', html)
+        html = re.sub(r'draggable="[^"]*"', '', html)
+        
+        # Ajouter des styles inline pour les images si elles n'en ont pas
+        # Cela évite les débordements d'images dans le PDF
+        html = re.sub(
+            r'<img([^>]*?)(?:style="[^"]*")?([^>]*?)>',
+            lambda m: f'<img{m.group(1)} style="max-width: 100%; height: auto; display: block;"{m.group(2)}>',
+            html
+        )
+        
+        # Supprimer les styles inline qui causent des problèmes avec WeasyPrint
+        # (position absolute/fixed, transform, etc.)
+        html = re.sub(r'position:\s*absolute\s*;?', '', html, flags=re.IGNORECASE)
+        html = re.sub(r'position:\s*fixed\s*;?', '', html, flags=re.IGNORECASE)
+        html = re.sub(r'transform:[^;]+;?', '', html, flags=re.IGNORECASE)
+        
+        # Nettoyer les espaces multiples
         html = re.sub(r'\s+', ' ', html).strip()
+        html = re.sub(r'>\s+<', '><', html)  # Supprimer les espaces entre les balises
+        
         return html
 
     def clean_grapesjs_css(self, css: str) -> str:
-        """Nettoie le CSS de GrapesJS pour l'impression."""
+        """Nettoie le CSS de GrapesJS pour WeasyPrint."""
         if not css:
             return ""
+        
+        # Supprimer les attributs GrapesJS
         css = re.sub(r'\[data-gjs[^\]]*\][^}]*}', '', css)
         css = re.sub(r'\.gjs-[^}]*}', '', css)
+        
+        # Remplacer les valeurs transparentes
         css = css.replace('rgba(0,0,0,0)', 'transparent')
+        
+        # Supprimer les propriétés CSS non supportées par WeasyPrint
+        unsupported_properties = [
+            r'transform:[^;]+;',
+            r'animation:[^;]+;',
+            r'transition:[^;]+;',
+            r'box-shadow:[^;]+;',
+            r'text-shadow:[^;]+;',
+            r'filter:[^;]+;',
+            r'backdrop-filter:[^;]+;',
+            r'clip-path:[^;]+;',
+            r'mask:[^;]+;',
+            r'cursor:[^;]+;',
+            r'pointer-events:[^;]+;',
+            r'user-select:[^;]+;',
+            r'-webkit-[^:]+:[^;]+;',
+            r'-moz-[^:]+:[^;]+;',
+            r'-ms-[^:]+:[^;]+;',
+        ]
+        
+        for prop in unsupported_properties:
+            css = re.sub(prop, '', css, flags=re.IGNORECASE)
+        
+        # Convertir les positionnements absolus/fixed en relatif pour éviter les débordements
+        css = re.sub(r'position:\s*absolute\s*;', 'position: relative;', css, flags=re.IGNORECASE)
+        css = re.sub(r'position:\s*fixed\s*;', 'position: relative;', css, flags=re.IGNORECASE)
+        
+        # Limiter les largeurs en pourcentage pour éviter les débordements
+        css = re.sub(r'width:\s*(\d+)vw\s*;', lambda m: f'width: {min(100, int(m.group(1)))}%;', css)
+        
+        # Nettoyer les espaces
         css = re.sub(r'\s+', ' ', css).strip()
+        css = re.sub(r'\s*{\s*', ' { ', css)
+        css = re.sub(r'\s*}\s*', ' } ', css)
+        css = re.sub(r'\s*;\s*', '; ', css)
+        css = re.sub(r';\s*}', ' }', css)  # Supprimer les ; en fin de bloc
+        
         return css
 
     def generate_footer(self, company_info: dict, current_date: str) -> str:
@@ -500,6 +611,12 @@ EXIGENCES :
 
 
 class PDFOfferGenerator(APIView):
+    """
+    Génère un PDF à partir d'un texte d'offre
+    Cette classe est dépréciée - utiliser TravelOfferGenerator + GrapesJSPDFGenerator
+    """
+    permission_classes = [AllowAny]
+    
     def post(self, request):
         text_input = request.data.get("text")
         company_info = request.data.get("company_info", {})
@@ -508,15 +625,77 @@ class PDFOfferGenerator(APIView):
             return Response({"error": "Texte requis"}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            pdf_generator = GrapesJSPDFGenerator()
-            pdf_content = pdf_generator.create_pdf_with_weasyprint(company_info)
+            # Générer d'abord la structure de l'offre
+            travel_generator = TravelOfferGenerator()
+            offer_response = travel_generator.post(request)
             
-            response = HttpResponse(pdf_content, content_type='application/pdf')
+            if offer_response.status_code != 200:
+                return offer_response
+            
+            offer_data = offer_response.data
+            offer_structure = offer_data.get("offer_structure", {})
+            
+            # Générer un HTML simple à partir de la structure
+            html_content = self._generate_html_from_structure(offer_structure)
+            css_content = ""
+            
+            # Générer le PDF avec WeasyPrint
+            pdf_generator = GrapesJSPDFGenerator()
+            printable_html = pdf_generator.convert_grapesjs_to_printable_html(
+                html_content, 
+                css_content, 
+                company_info
+            )
+            
+            pdf_bytes = HTML(string=printable_html).write_pdf()
+            
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
             response['Content-Disposition'] = 'attachment; filename="offre_voyage.pdf"'
             return response
             
         except Exception as e:
+            traceback.print_exc()
             return Response({"error": f"Erreur : {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def _generate_html_from_structure(self, offer_structure):
+        """Génère un HTML simple à partir de la structure d'offre"""
+        html_parts = []
+        
+        # Titre
+        title = offer_structure.get("title", "Offre de voyage")
+        html_parts.append(f"<h1>{title}</h1>")
+        
+        # Introduction
+        intro = offer_structure.get("introduction", "")
+        if intro:
+            html_parts.append(f"<p>{intro}</p>")
+        
+        # Sections
+        sections = offer_structure.get("sections", [])
+        for section in sections:
+            section_title = section.get("title", "")
+            section_body = section.get("body", "")
+            
+            if section_title:
+                html_parts.append(f"<h2>{section_title}</h2>")
+            if section_body:
+                html_parts.append(f"<div>{section_body}</div>")
+        
+        # CTA
+        cta = offer_structure.get("cta", {})
+        if cta:
+            cta_title = cta.get("title", "")
+            cta_desc = cta.get("description", "")
+            
+            if cta_title or cta_desc:
+                html_parts.append("<div class='cta-section'>")
+                if cta_title:
+                    html_parts.append(f"<h2>{cta_title}</h2>")
+                if cta_desc:
+                    html_parts.append(f"<p>{cta_desc}</p>")
+                html_parts.append("</div>")
+        
+        return "\n".join(html_parts)
 
 
 class PdfToGJSEndpoint(APIView):
