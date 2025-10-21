@@ -18,8 +18,25 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from django.http import JsonResponse
+from django.views.decorators.http import require_http_methods
+
+
+@require_http_methods(["GET"])
+def root_view(request):
+    """Vue racine qui affiche les informations du projet"""
+    return JsonResponse({
+        "project": "Invitation au Voyage - Backend API",
+        "version": "1.0.0",
+        "status": "online",
+        "api": "/api/",
+        "admin": "/admin/",
+        "documentation": "https://github.com/QuentiinRoland/invitationAuVoyage-backend"
+    })
+
 
 urlpatterns = [
+    path('', root_view, name='root'),
     path('admin/', admin.site.urls),
     path("api/", include("api.urls")),
 ]
