@@ -96,8 +96,32 @@ else:
         FRONTEND_URL_CORS,  # URL du frontend depuis les variables d'environnement
         "http://localhost:3000",  # Pour le développement local
         "http://localhost:3002",  # Pour le développement local (Vite)
+        "https://invitation-au-voyage-frontend-1ge3xg77g.vercel.app",  # Frontend Vercel
+        "https://invitation-au-voyage-frontend.vercel.app",  # Si tu as un domaine custom
     ]
     CORS_ALLOW_CREDENTIALS = True
+
+# Headers CORS supplémentaires pour les requêtes complexes
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
 
 # Configuration REST Framework
 REST_FRAMEWORK = {
