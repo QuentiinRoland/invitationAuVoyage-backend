@@ -219,7 +219,7 @@ class GrapesJSPDFGenerator(APIView):
     /* Configuration de la page pour WeasyPrint */
     @page {{
       size: A4;
-      margin: 1.5cm 2cm;
+      margin: 0;
     }}
     
     body {{
@@ -229,13 +229,29 @@ class GrapesJSPDFGenerator(APIView):
       background: white;
       width: 100%;
       max-width: 100%;
-      padding: 0;
+      padding: 3cm 2cm 2cm 2cm;
       margin: 0;
       font-size: 11pt;
     }}
 
     /* CSS GrapesJS nettoyé */
     {clean_css}
+
+    /* Empêcher la répétition des backgrounds */
+    [style*="background"] {{
+      background-repeat: no-repeat !important;
+      background-size: cover !important;
+    }}
+    
+    /* Conteneur principal avec padding pour le logo */
+    .grapesjs-content {{
+      width: 100%;
+      overflow: hidden;
+      position: relative;
+      z-index: 10;
+      background: white;
+      padding-top: 20px;
+    }}
 
     /* Améliorations sections - compatible WeasyPrint */
     .flight-section, .hotel-section, .price-section {{
@@ -259,15 +275,19 @@ class GrapesJSPDFGenerator(APIView):
       border-radius: 5px;
     }}
     
-    /* Titres */
+    /* Titres avec espacement pour ne pas chevaucher le logo */
     h1, h2, h3 {{ 
       page-break-after: avoid;
       page-break-inside: avoid;
       margin-bottom: 12px;
       margin-top: 15px;
+      clear: both;
     }}
     
-    h1 {{ font-size: 20pt; }}
+    h1 {{ 
+      font-size: 20pt;
+      margin-top: 30px;
+    }}
     h2 {{ font-size: 16pt; }}
     h3 {{ font-size: 13pt; }}
     
@@ -285,12 +305,7 @@ class GrapesJSPDFGenerator(APIView):
       height: auto;
       display: block;
       page-break-inside: avoid;
-    }}
-    
-    /* Conteneur principal */
-    .grapesjs-content {{
-      width: 100%;
-      overflow: hidden;
+      background-repeat: no-repeat;
     }}
     
     /* Empêcher les débordements */
@@ -339,6 +354,13 @@ class GrapesJSPDFGenerator(APIView):
             html
         )
         
+        # Forcer background-repeat: no-repeat sur tous les éléments avec background inline
+        html = re.sub(
+            r'style="([^"]*background[^"]*)"',
+            lambda m: f'style="{m.group(1)}; background-repeat: no-repeat; background-size: contain; background-position: center;"',
+            html
+        )
+        
         # Supprimer les styles inline qui causent des problèmes avec WeasyPrint
         # (position absolute/fixed, transform, etc.)
         html = re.sub(r'position:\s*absolute\s*;?', '', html, flags=re.IGNORECASE)
@@ -362,6 +384,20 @@ class GrapesJSPDFGenerator(APIView):
         
         # Remplacer les valeurs transparentes
         css = css.replace('rgba(0,0,0,0)', 'transparent')
+        
+        # Forcer background-repeat: no-repeat pour tous les backgrounds
+        css = re.sub(
+            r'(background[^:]*:[^;]+;)',
+            lambda m: m.group(1) if 'background-repeat' in m.group(1) else m.group(1).rstrip(';') + '; background-repeat: no-repeat;',
+            css
+        )
+        
+        # Ajouter background-size: contain pour les backgrounds pour éviter la répétition
+        css = re.sub(
+            r'(background-image:[^;]+;)',
+            r'\1 background-size: contain; background-position: center; background-repeat: no-repeat;',
+            css
+        )
         
         # Supprimer les propriétés CSS non supportées par WeasyPrint
         unsupported_properties = [
