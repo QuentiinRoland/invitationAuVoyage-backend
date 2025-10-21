@@ -30,8 +30,6 @@ worker_tmp_dir = "/dev/shm"
 
 # Configuration des signaux
 graceful_timeout = 30
-worker_int = "INT"
-worker_abort = "ABRT"
 
 # Configuration du proxy (important pour Render)
 forwarded_allow_ips = "*"
