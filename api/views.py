@@ -829,8 +829,17 @@ class PdfToGJSEndpoint(APIView):
 
         for page_num, page in enumerate(doc):
             # Texte en blocs (unifié)
-            text = page.get_text("markdown") or page.get_text("text")
-            if text:
+            # Essayer markdown d'abord, sinon fallback sur text
+            try:
+                text = page.get_text("markdown")
+            except (AssertionError, ValueError):
+                # Si markdown n'est pas supporté, utiliser text
+                try:
+                    text = page.get_text("text")
+                except Exception:
+                    text = ""
+            
+            if text and text.strip():
                 chunks.append(text.strip())
 
             # Images avec améliorations
