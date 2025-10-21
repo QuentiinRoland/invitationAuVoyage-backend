@@ -842,14 +842,29 @@ class PdfToGJSEndpoint(APIView):
                     
                     # Vérifier la taille de l'image (filtrer les trop petites)
                     if pix.width < 50 or pix.height < 50:
+                        if pix:
+                            pix = None
                         continue
                     
-                    # Conversion CMYK → RGB si nécessaire
-                    if pix.n > 4:  # CMYK → RGB
-                        pix = fitz.Pixmap(fitz.csRGB, pix)
+                    # Conversion CMYK → RGB si nécessaire avec gestion d'erreur
+                    try:
+                        if pix.n > 4:  # CMYK → RGB
+                            old_pix = pix
+                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                            old_pix = None  # Libérer l'ancienne pixmap
+                    except Exception as conv_error:
+                        print(f"⚠️ Erreur conversion couleur image page {page_num+1}: {conv_error}")
+                        # Essayer de continuer avec l'image originale
+                        pass
                     
-                    # Convertir en PNG
-                    img_bytes = pix.tobytes("png")
+                    # Convertir en PNG avec gestion d'erreur
+                    try:
+                        img_bytes = pix.tobytes("png")
+                    except Exception as png_error:
+                        print(f"⚠️ Erreur conversion PNG page {page_num+1}: {png_error}")
+                        if pix:
+                            pix = None
+                        continue
                     
                     # Vérifier que l'image n'est pas trop grande (limite à 2MB)
                     if len(img_bytes) > 2 * 1024 * 1024:
