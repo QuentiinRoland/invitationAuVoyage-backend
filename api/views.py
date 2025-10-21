@@ -240,7 +240,7 @@ class GrapesJSPDFGenerator(APIView):
     /* Conteneur principal - padding pour descendre le texte sur TOUTES les pages */
     .grapesjs-content {{
       width: 100%;
-      overflow: hidden;
+      overflow: visible;
       position: relative;
       padding: 5cm 2cm 2cm 2cm;
     }}
