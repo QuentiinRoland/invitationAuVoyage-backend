@@ -1,0 +1,38 @@
+# Service systemd pour Invitation au Voyage
+# À copier vers /etc/systemd/system/invitationauvoyage.service
+
+[Unit]
+Description=Invitation au Voyage Django App
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=notify
+User=invitationauvoyage
+Group=invitationauvoyage
+WorkingDirectory=/home/invitationauvoyage/invitationAuVoyage/backend
+Environment="PATH=/home/invitationauvoyage/invitationAuVoyage/backend/venv/bin"
+Environment="DJANGO_SETTINGS_MODULE=config.settings"
+ExecStart=/home/invitationauvoyage/invitationAuVoyage/backend/venv/bin/gunicorn --config gunicorn.conf.py config.wsgi:application
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=always
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+
+# Configuration des logs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=invitationauvoyage
+
+# Configuration de sécurité
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/invitationauvoyage/invitationAuVoyage/backend
+ReadWritePaths=/var/log/invitationauvoyage
+
+[Install]
+WantedBy=multi-user.target
+
