@@ -9,9 +9,9 @@ echo "🚀 Début du build pour Render..."
 echo "📦 Installation des dépendances Python..."
 pip install -r requirements.txt
 
-# Installer Playwright (pour la génération PDF)
-echo "🎭 Installation de Playwright..."
-playwright install chromium
+# Installer Playwright avec les dépendances système (pour la génération PDF)
+echo "🎭 Installation de Playwright avec dépendances système..."
+playwright install --with-deps chromium
 
 # Collecter les fichiers statiques
 echo "📁 Collection des fichiers statiques..."
