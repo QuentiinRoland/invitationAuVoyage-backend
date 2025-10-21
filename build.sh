@@ -9,9 +9,10 @@ echo "🚀 Début du build pour Render..."
 echo "📦 Installation des dépendances Python..."
 pip install -r requirements.txt
 
-# Installation de Playwright avec Chromium (Render Pro)
-echo "🎭 Installation de Playwright avec Chromium..."
-playwright install --with-deps chromium
+# Installation de Playwright Chromium (sans sudo - compatible Render)
+echo "🎭 Installation de Playwright Chromium..."
+# Installer uniquement le binaire sans les dépendances système
+PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium
 
 # Collecter les fichiers statiques
 echo "📁 Collection des fichiers statiques..."
