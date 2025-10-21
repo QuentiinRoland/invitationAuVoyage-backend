@@ -10,7 +10,7 @@ from django.core.files.storage import default_storage
 import json
 from openai import OpenAI
 import re
-from weasyprint import HTML, CSS
+from playwright.sync_api import sync_playwright
 from datetime import datetime
 import os
 import requests
@@ -179,8 +179,17 @@ class GrapesJSPDFGenerator(APIView):
             # IMPORTANT: on recompose un HTML complet imprimable
             printable_html = self.convert_grapesjs_to_printable_html(html_content, css_content, company_info)
 
-            # Génération PDF avec WeasyPrint (compatible Render Free)
-            pdf_bytes = HTML(string=printable_html).write_pdf()
+            # Génération PDF avec Playwright (Chromium - qualité professionnelle)
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.set_content(printable_html, wait_until="networkidle")
+                pdf_bytes = page.pdf(
+                    format="A4",
+                    print_background=True,
+                    margin={"top": "20mm", "bottom": "20mm", "left": "20mm", "right": "20mm"}
+                )
+                browser.close()
 
             resp = HttpResponse(pdf_bytes, content_type="application/pdf")
             resp["Content-Disposition"] = 'inline; filename="grapesjs-content.pdf"'
