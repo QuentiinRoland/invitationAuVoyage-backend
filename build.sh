@@ -21,6 +21,10 @@ python manage.py collectstatic --no-input
 echo "🗄️ Application des migrations de base de données..."
 python manage.py migrate
 
+# Créer le superuser automatiquement
+echo "👤 Création du superuser..."
+python create_superuser.py
+
 echo "✅ Build terminé avec succès !"
 
 
