@@ -10,7 +10,6 @@ from django.core.files.storage import default_storage
 import json
 from openai import OpenAI
 import re
-from playwright.sync_api import sync_playwright
 from datetime import datetime
 import os
 import requests
@@ -21,6 +20,7 @@ import base64
 import io
 import fitz  # PyMuPDF
 import traceback
+from weasyprint import HTML, CSS
 from .models import Document, DocumentAsset, Folder
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -179,17 +179,8 @@ class GrapesJSPDFGenerator(APIView):
             # IMPORTANT: on recompose un HTML complet imprimable
             printable_html = self.convert_grapesjs_to_printable_html(html_content, css_content, company_info)
 
-            with sync_playwright() as p:
-                browser = p.chromium.launch()  # headless par défaut
-                page = browser.new_page()
-                # Rendre le HTML directement (pas besoin d'un serveur HTML séparé)
-                page.set_content(printable_html, wait_until="load")
-                pdf_bytes = page.pdf(
-                    format="A4",
-                    print_background=True,
-                    margin={"top": "20mm", "bottom": "20mm", "left": "20mm", "right": "20mm"}
-                )
-                browser.close()
+            # Génération PDF avec WeasyPrint (ne nécessite pas Chromium)
+            pdf_bytes = HTML(string=printable_html).write_pdf()
 
             resp = HttpResponse(pdf_bytes, content_type="application/pdf")
             resp["Content-Disposition"] = 'inline; filename="grapesjs-content.pdf"'
