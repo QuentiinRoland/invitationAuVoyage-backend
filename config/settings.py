@@ -90,9 +90,12 @@ if DEBUG:
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
+    # Récupérer l'URL du frontend depuis les variables d'environnement
+    FRONTEND_URL_CORS = os.getenv('FRONTEND_URL', 'http://localhost:3002')
     CORS_ALLOWED_ORIGINS = [
-        "https://your-frontend-domain.onrender.com",  # Remplacer par votre domaine frontend
+        FRONTEND_URL_CORS,  # URL du frontend depuis les variables d'environnement
         "http://localhost:3000",  # Pour le développement local
+        "http://localhost:3002",  # Pour le développement local (Vite)
     ]
     CORS_ALLOW_CREDENTIALS = True
 
