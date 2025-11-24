@@ -29,10 +29,20 @@ weasyprint==62.3
 beautifulsoup4==4.12.3
 lxml==5.3.0
 
+# Scraping JavaScript (navigateur headless)
+playwright==1.47.0
+
+# Recherche web en temps réel
+tavily-python==0.7.12
+
+# API de vols réels
+requests==2.32.3
+
 # Utilitaires
 python-dotenv==1.0.1
 asgiref==3.8.1
 sqlparse==0.5.3
+python-dateutil==2.9.0
 
 # Production
 gunicorn==23.0.0

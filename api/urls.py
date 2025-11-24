@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     APIRootView, TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint, ImproveOfferEndpoint,
-    DocumentGeneratePDFView, PDFOfferGenerator
+    DocumentGeneratePDFView, PDFOfferGenerator, FreepikImageSearchView
 )
 from .auth_views import (
     RegisterView, LoginView, LogoutView, ProfileView, ChangePasswordView, CheckAuthView,
@@ -47,4 +47,7 @@ urlpatterns = [
     path("folders/", FolderListCreateView.as_view(), name="folder-list-create"),
     path("folders/<int:pk>/", FolderDetailView.as_view(), name="folder-detail"),
     path("folders/<int:folder_id>/documents/", FolderDocumentsView.as_view(), name="folder-documents"),
+    
+    # Proxy Freepik API (public - pas besoin d'authentification)
+    path("freepik/search/", FreepikImageSearchView.as_view(), name="freepik-search"),
 ]

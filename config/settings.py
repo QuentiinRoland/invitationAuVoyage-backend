@@ -37,9 +37,31 @@ else:
 # OpenAI API Key
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# Tavily API Key (recherche web en temps réel - optionnel)
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+# Aviationstack API Key (vols réels avec horaires, numéros, prix - DEPRECATED)
+AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
+
+# Air France-KLM API (vols RÉELS avec horaires, numéros, prix - PRIORITÉ)
+# Obtenez vos clés sur https://developer.airfranceklm.com
+AIRFRANCE_KLM_API_KEY = os.getenv("AIRFRANCE_KLM_API_KEY")
+AIRFRANCE_KLM_API_SECRET = os.getenv("AIRFRANCE_KLM_API_SECRET")
+
+# Amadeus API (vols RÉELS - 500+ compagnies aériennes - RECOMMANDÉ)
+# Obtenez vos clés sur https://developers.amadeus.com
+AMADEUS_API_KEY = os.getenv("AMADEUS_API_KEY")
+AMADEUS_API_SECRET = os.getenv("AMADEUS_API_SECRET")
+AMADEUS_USE_TEST = os.getenv("AMADEUS_USE_TEST", "True").lower() == "true"
+
 # APIs d'images
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 BING_IMAGE_SUBSCRIPTION_KEY = os.getenv("BING_IMAGE_SUBSCRIPTION_KEY")
+
+# Freepik API (millions d'images professionnelles - RECOMMANDÉ)
+# Obtenez votre clé sur https://www.freepik.com/api
+FREEPIK_API_KEY = os.getenv("FREEPIK_API_KEY", "FPSXdbb31bca84c6e7f77a957daa99cbd3b6")
+FREEPIK_WEBHOOK = os.getenv("FREEPIK_WEBHOOK", "549c5f5082dd8b6cce87aee831c616a9")
 
 # Application definition
 INSTALLED_APPS = [

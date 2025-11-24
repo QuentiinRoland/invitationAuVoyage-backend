@@ -1,0 +1,42 @@
+{
+  "title": "Séjour Détente : Escapade à Marrakech",
+  "introduction": "Évadez-vous le temps d'un séjour enchanteur à Marrakech, la perle du Sud marocain. Entre souks colorés, palais somptueux et jardins exotiques, découvrez une ville où tradition et modernité se côtoient harmonieusement. Un séjour tout inclus pour une expérience inoubliable au cœur de la médina.",
+  "sections": [
+    {
+      "id": "flights",
+      "type": "Flights",
+      "title": "Transport Aérien",
+      "body": "Vol aller-retour Paris - Marrakech\n\nCompagnie : Royal Air Maroc\nNuméro de vol aller : AT 456\nDépart : Paris Orly le 20 juillet 2025 à 09h15\nArrivée : Marrakech (RAK) le 20 juillet 2025 à 11h30\nDurée : 3h15\n\nNuméro de vol retour : AT 457\nDépart : Marrakech (RAK) le 27 juillet 2025 à 12h45\nArrivée : Paris Orly le 27 juillet 2025 à 17h00\nDurée : 3h15\n\nClasse : Économique\nBagages : 1 bagage cabine (10 kg) + 1 bagage en soute (23 kg)\nRepas : Collation servie à bord\nService : Divertissements à bord et Wi-Fi (payant)"
+    },
+    {
+      "id": "transfers",
+      "type": "Transfers",
+      "title": "Transferts",
+      "body": "Transferts aéroport-hôtel aller-retour inclus\n\nService : Véhicule privé climatisé avec chauffeur\nPrise en charge : Accueil à l'aéroport avec panneau nominatif\nAssistance : Aide aux bagages et accompagnement jusqu'à l'hôtel\nDurée : Environ 20 minutes depuis l'aéroport\n\nRetour : Transfert depuis l'hôtel vers l'aéroport selon horaire de vol"
+    },
+    {
+      "id": "hotel",
+      "type": "Hotel",
+      "title": "Hébergement",
+      "body": "Hôtel 5 étoiles - Palais de la Médina\n\nNom : Riad Palais des Sultans ou similaire\nSituation : En plein cœur de la médina, à 5 minutes à pied de la place Jemaa el-Fnaa\n\nHébergement :\n- 7 nuits en chambre double supérieure\n- Petit-déjeuner buffet inclus (servi de 7h à 10h30)\n- Vue sur les jardins ou la cour intérieure\n\nÉquipements de la chambre :\n- Climatisation et chauffage\n- TV écran plat avec chaînes satellite\n- Wi-Fi gratuit\n- Minibar\n- Coffre-fort\n- Salle de bain privative avec douche\n\nÉquipements de l'hôtel :\n- 2 piscines (une sur le toit avec vue panoramique)\n- Spa et hammam traditionnel\n- Restaurant gastronomique et restaurant rooftop\n- Bar lounge\n- Salle de fitness\n- Jardin andalou avec fontaines\n- Service de conciergerie 24/24\n\nPension :\n- Petit-déjeuner buffet inclus tous les jours\n- Option demi-pension disponible : +45€ par personne et par jour\n- Option pension complète disponible : +85€ par personne et par jour"
+    },
+    {
+      "id": "services",
+      "type": "Services",
+      "title": "Services Inclus",
+      "body": "Services inclus dans le séjour :\n\n- 7 nuits d'hébergement en hôtel 5 étoiles\n- Petit-déjeuner buffet quotidien\n- Accès à toutes les installations de l'hôtel (piscines, spa, fitness)\n- Wi-Fi gratuit dans tout l'hôtel\n- Service de conciergerie\n- Transferts aéroport-hôtel aller-retour\n- Taxes de séjour incluses\n\nServices non inclus :\n- Déjeuners et dîners (sauf si option pension choisie)\n- Boissons (hors petit-déjeuner)\n- Soins au spa (payants sur place)\n- Excursions et activités extérieures"
+    },
+    {
+      "id": "price",
+      "type": "Price",
+      "title": "Tarifs & Conditions",
+      "body": "Prix par personne en chambre double : À partir de 890€\nPrix par personne en chambre single : À partir de 1 250€\n\nLe prix comprend :\n- Vols aller-retour Paris-Marrakech en classe économique\n- Transferts aéroport-hôtel aller-retour\n- 7 nuits en hôtel 5 étoiles\n- Petit-déjeuner buffet quotidien\n- Taxes d'aéroport\n- Taxes de séjour\n\nLe prix ne comprend pas :\n- Déjeuners et dîners (sauf si option choisie)\n- Boissons\n- Excursions\n- Assurance voyage\n- Dépenses personnelles\n\nConditions de réservation :\n- Acompte : 30% à la réservation\n- Solde : 21 jours avant le départ\n- Annulation gratuite jusqu'à 30 jours avant le départ\n- Annulation entre 30 et 14 jours : 50% de frais\n- Annulation moins de 14 jours : 100% de frais\n- Modification : 30€ de frais par modification"
+    }
+  ],
+  "cta": {
+    "title": "Réservez votre séjour à Marrakech",
+    "description": "Profitez d'une escapade tout confort au cœur de la médina",
+    "buttonText": "Réserver maintenant"
+  }
+}
+

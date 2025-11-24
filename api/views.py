@@ -16,7 +16,28 @@ import os
 import requests
 from urllib.parse import urlparse
 import hashlib
+from bs4 import BeautifulSoup
 import pathlib
+from pathlib import Path
+
+# Chemin vers le répertoire du projet
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Recherche web en temps réel (optionnel - nécessite TAVILY_API_KEY)
+try:
+    from tavily import TavilyClient
+    TAVILY_AVAILABLE = True
+except ImportError:
+    TAVILY_AVAILABLE = False
+    print("⚠️ Tavily non disponible. Installer avec: pip install tavily-python")
+
+# Scraping JavaScript (optionnel - nécessite playwright)
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    print("⚠️ Playwright non disponible. Installer avec: pip install playwright && playwright install chromium")
 import base64
 import io
 import fitz  # PyMuPDF
@@ -142,21 +163,23 @@ def search_bing_images(query: str, count: int = 1):
         return []
 
 def cache_image(url: str) -> str:
-    """Cache une image localement et retourne l'URL locale"""
+    """Cache une image localement et retourne le chemin absolu pour WeasyPrint"""
     try:
         h = hashlib.sha1(url.encode()).hexdigest()
-        ext = ".jpg"
+        ext = ".png" if url.lower().endswith('.png') else ".jpg"
         local = MEDIA_DIR / f"{h}{ext}"
         
         if not local.exists():
-            r = requests.get(url, timeout=5)  # Réduit à 5 secondes pour éviter les timeouts
+            print(f"📥 Téléchargement image: {url}")
+            r = requests.get(url, timeout=10)
             r.raise_for_status()
             local.write_bytes(r.content)
+            print(f"✅ Image téléchargée: {local} ({len(r.content)} bytes)")
         
-        # Retourne une URL relative pour servir depuis Django
-        return f"/media/offer_images/{local.name}"
+        # Retourne le chemin absolu avec file:// pour WeasyPrint
+        return f"file://{local.absolute()}"
     except Exception as e:
-        print(f"Erreur cache image: {e}")
+        print(f"⚠️ Erreur cache image {url}: {e}")
         return url  # Retourne l'URL originale en cas d'erreur
 
 
@@ -203,8 +226,6 @@ class GrapesJSPDFGenerator(APIView):
         company_name  = company_info.get('name', 'Votre Entreprise')
         clean_html    = self.clean_grapesjs_html(grapesjs_html)
         clean_css     = self.clean_grapesjs_css(grapesjs_css)
-        current_date  = datetime.now().strftime("%d/%m/%Y à %H:%M")
-        footer_html   = self.generate_footer(company_info, current_date)
 
         # Page HTML complète avec le CSS embarqué optimisé pour WeasyPrint
         return f"""<!DOCTYPE html>
@@ -232,6 +253,13 @@ class GrapesJSPDFGenerator(APIView):
       padding: 0;
       margin: 0;
       font-size: 9pt;
+      position: relative;
+    }}
+    
+    /* Supprimer tous les espaces au-dessus du header */
+    body::before {{
+      content: none;
+      display: none;
     }}
 
     /* CSS GrapesJS nettoyé - Le background sera sur TOUTES les pages */
@@ -242,7 +270,7 @@ class GrapesJSPDFGenerator(APIView):
       width: 100%;
       overflow: visible;
       position: relative;
-      padding: 5cm 2cm 2cm 2cm;
+      padding: 1cm 2cm 2cm 2cm;
     }}
 
     /* Sections compactes */
@@ -327,14 +355,13 @@ class GrapesJSPDFGenerator(APIView):
       padding-top: 8px;
       font-size: 7pt;
     }}
+    
   </style>
 </head>
 <body>
   <div class="grapesjs-content">
     {clean_html}
   </div>
-
-  {footer_html}
 </body>
 </html>"""
 
@@ -487,67 +514,2228 @@ class GrapesJSPDFGenerator(APIView):
 class TravelOfferGenerator(APIView):
     permission_classes = [AllowAny]  # Accès libre temporaire
     
-    def post(self, request):
-        text_input = request.data.get("text")
-        company_info = request.data.get("company_info", {})
+    def _load_default_templates(self, offer_type):
+        """
+        Charge les templates par défaut depuis les fichiers JSON selon le type d'offre.
+        """
+        try:
+            template_path = BASE_DIR / 'api' / 'templates' / f'{offer_type}_example.json'
+            if template_path.exists():
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    template_data = json.load(f)
+                    return [template_data]  # Retourner sous forme de liste
+            else:
+                print(f"⚠️ Template par défaut non trouvé: {template_path}")
+                return None
+        except Exception as e:
+            print(f"❌ Erreur chargement template par défaut: {str(e)}")
+            return None
+    
+    def _scrape_website_description(self, url, max_length=2000):
+        """
+        Récupère la description d'un site web en scrapant son contenu.
+        Extrait le texte principal et les meta descriptions.
+        ATTENTION: Cette méthode ne peut pas exécuter JavaScript.
+        Pour les sites JS/Angular/React, utiliser _scrape_with_tavily().
+        """
+        try:
+            # S'assurer que l'URL a un protocole
+            original_url = url
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+                print(f"🔧 URL corrigée: {original_url} → {url}")
+            
+            # Détecter si l'URL contient beaucoup de paramètres (souvent signe d'un site JS)
+            if '?' in url and len(url.split('?')[1]) > 100:
+                print(f"   ⚠️ URL avec beaucoup de paramètres détectée - ce site utilise probablement JavaScript")
+                print(f"   💡 Recommandation: Ce type de site nécessite Tavily pour être correctement scrapé")
+            
+            print(f"📡 Requête HTTP vers: {url}")
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Referer': 'https://www.google.com/'  # Simuler une arrivée depuis Google
+            }
+            print(f"⏱️ Timeout de 20 secondes pour le scraping...")
+            response = requests.get(url, headers=headers, timeout=20, allow_redirects=True, verify=False)
+            print(f"📥 Réponse HTTP: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"⚠️ Code HTTP non-200: {response.status_code}")
+                return None
+            
+            response.raise_for_status()
+            
+            # Vérifier que le contenu n'est pas vide
+            if not response.content or len(response.content) < 100:
+                print(f"⚠️ Réponse vide ou trop courte: {len(response.content) if response.content else 0} bytes")
+                return None
+            
+            print(f"📄 Taille du contenu HTML: {len(response.content)} bytes")
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Supprimer les scripts et styles
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.decompose()
+            
+            # Extraire meta description
+            meta_desc = ""
+            meta_tag = soup.find("meta", attrs={"name": "description"})
+            if meta_tag and meta_tag.get("content"):
+                meta_desc = meta_tag.get("content")
+            
+            # Extraire le texte principal
+            text_content = soup.get_text(separator=' ', strip=True)
+            
+            # Détecter si le contenu contient beaucoup de templates Angular/React/JS non rendus
+            js_templates = ['{{', 'ng-', '[ng', '*ng', 'v-if', 'v-for', '@click', 'className', 'useState']
+            has_js_templates = any(template in str(response.content) for template in js_templates)
+            
+            if has_js_templates:
+                print(f"   ⚠️ Site JavaScript détecté (templates non rendus trouvés)")
+                print(f"   💡 Ce site nécessite JavaScript pour afficher le contenu. BeautifulSoup ne peut pas l'exécuter.")
+                print(f"   💡 Le contenu extrait sera probablement incomplet (templates {{ }})")
+            
+            # Nettoyer le texte (supprimer espaces multiples)
+            lines = (line.strip() for line in text_content.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text_content = ' '.join(chunk for chunk in chunks if chunk)
+            
+            # Combiner meta description + texte principal
+            full_content = ""
+            if meta_desc:
+                full_content = f"Description: {meta_desc}\n\n"
+            
+            # Limiter la longueur
+            if len(text_content) > max_length:
+                text_content = text_content[:max_length] + "..."
+            
+            full_content += text_content
+            
+            # Vérifier que le contenu final n'est pas vide
+            if not full_content or len(full_content.strip()) < 50:
+                print(f"⚠️ Contenu extrait trop court: {len(full_content)} caractères")
+                print(f"   Preview: {full_content[:200]}")
+                return None
+            
+            print(f"✅ Contenu extrait: {len(full_content)} caractères")
+            print(f"   Preview: {full_content[:300]}...")
+            
+            return full_content
+            
+        except requests.exceptions.Timeout:
+            print(f"⏱️ Timeout lors du scraping de {url} (le site prend trop de temps à répondre)")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Erreur HTTP lors du scraping de {url}: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"   Status code: {e.response.status_code}")
+            return None
+        except Exception as e:
+            print(f"❌ Erreur scraping {url}: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
+            return None
+    
+    def _get_website_descriptions(self, urls):
+        """
+        Récupère les descriptions de plusieurs sites web.
+        Retourne une liste de descriptions avec statut pour le debugging.
+        Pour les sites JavaScript/Angular/React, utilise Tavily directement.
+        """
+        descriptions = []
+        failed_urls = []
+        for url in urls:
+            if url and url.strip():
+                url_clean = url.strip()
+                print(f"🌐 Tentative de scraping: {url_clean}")
+                
+                # Détecter si c'est probablement un site JavaScript (misterfly, booking, etc.)
+                js_sites_keywords = ['misterfly', 'booking.com', 'expedia', 'airbnb', 'vrbo', 'hotels.com']
+                is_js_site = any(keyword in url_clean.lower() for keyword in js_sites_keywords)
+                
+                # Stratégie : Essayer Playwright (navigateur headless) en premier pour les sites JS
+                # Si Playwright n'est pas disponible, utiliser Tavily, sinon BeautifulSoup
+                desc = None
+                
+                if is_js_site and PLAYWRIGHT_AVAILABLE:
+                    print(f"   🎭 Site JavaScript détecté, utilisation de Playwright (navigateur headless)...")
+                    desc = self._scrape_with_playwright(url_clean)
+                
+                # Si Playwright échoue ou n'est pas disponible, essayer Tavily
+                if (not desc or len(desc.strip()) < 50) and TAVILY_AVAILABLE:
+                    if desc:
+                        print(f"   ⚠️ Playwright échoué, essai avec Tavily...")
+                    else:
+                        print(f"   🔍 Tentative avec Tavily...")
+                    desc_tavily = self._scrape_with_tavily(url_clean)
+                    if desc_tavily:
+                        desc = desc_tavily
+                
+                # Si tout échoue, essayer le scraping classique (pour les sites HTML simples)
+                if not desc or len(desc.strip()) < 50:
+                    if desc:
+                        print(f"   ⚠️ Méthodes avancées échouées, essai avec scraping classique...")
+                    else:
+                        print(f"   📄 Tentative avec scraping classique (BeautifulSoup)...")
+                    desc = self._scrape_website_description(url_clean)
+                
+                if desc and len(desc.strip()) > 50:  # Vérifier que le contenu n'est pas vide
+                    # Extraire aussi les images
+                    images = []
+                    if is_js_site and PLAYWRIGHT_AVAILABLE:
+                        images = self._extract_images_with_playwright(url_clean)
+                    elif desc:  # Si on a du contenu, extraire les images de l'URL
+                        images = self._extract_images_from_url(url_clean)
+                    
+                    descriptions.append({
+                        "url": url_clean,
+                        "content": desc,
+                        "images": images[:5] if images else []  # Limiter à 5 images max
+                    })
+                    if images:
+                        print(f"✅ Scraping réussi pour: {url_clean} ({len(desc)} caractères, {len(images)} image(s) trouvée(s))")
+                    else:
+                        print(f"✅ Scraping réussi pour: {url_clean} ({len(desc)} caractères)")
+                else:
+                    failed_urls.append(url_clean)
+                    print(f"❌ Échec du scraping pour: {url_clean} (toutes les méthodes ont échoué)")
+                    if not TAVILY_AVAILABLE:
+                        print(f"   💡 Astuce: Tavily n'est pas configuré. Pour les sites JavaScript, il est recommandé d'ajouter TAVILY_API_KEY dans .env")
+        if failed_urls:
+            print(f"⚠️ {len(failed_urls)} URL(s) n'ont pas pu être scrappées: {', '.join(failed_urls)}")
+        return descriptions
+    
+    def _search_flights_with_airfrance_klm(self, origin_code, destination_code, travel_date, return_date=None, search_metadata=None):
+        """
+        Recherche de VRAIS vols avec l'API Air France-KLM.
+        Retourne des vols réels avec horaires, numéros de vol, compagnies.
+        Documentation: https://developer.airfranceklm.com/products/api/flightstatus/api-reference
         
-        if not text_input:
-            return Response({"error": "Texte requis"}, status=status.HTTP_400_BAD_REQUEST)
+        Args:
+            origin_code: Code IATA de l'aéroport de départ (ex: 'CDG')
+            destination_code: Code IATA de l'aéroport de destination (ex: 'DPS')
+            travel_date: Date de voyage au format YYYY-MM-DD
+            return_date: Date de retour au format YYYY-MM-DD (optionnel)
+            search_metadata: Dict pour stocker les métadonnées de recherche (détails d'erreur API, etc.)
+        """
+        from django.conf import settings
+        import time
+        import random
+        
+        print("=" * 80)
+        print("✈️✈️✈️ DÉBUT RECHERCHE AIR FRANCE-KLM API ✈️✈️✈️")
+        print("=" * 80)
+        
+        api_key = getattr(settings, 'AIRFRANCE_KLM_API_KEY', None)
+        
+        if not api_key:
+            print("❌❌❌ ERREUR: AIRFRANCE_KLM_API_KEY non configurée")
+            if search_metadata is not None:
+                search_metadata['failure_reason'] = ['credentials_missing']
+            return None
+        
+        # Fonction pour faire des requêtes avec backoff exponentiel
+        def make_api_request(url, params, headers, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    # Délai exponentiel avec jitter
+                    if attempt > 0:
+                        backoff_time = (2 ** attempt) + random.uniform(0, 1)
+                        print(f"⏱️ Tentative {attempt+1}/{max_retries} - Attente de {backoff_time:.2f} secondes...")
+                        time.sleep(backoff_time)
+                    
+                    print(f"📡 Requête vers {url}")
+                    print(f"   - Paramètres: {params}")
+                    print(f"   - Headers: {list(headers.keys())}")
+                    
+                    response = requests.get(url, params=params, headers=headers, timeout=30)
+                    
+                    print(f"📊 Code de statut: {response.status_code}")
+                    if response.status_code == 200:
+                        return response.json()
+                    elif response.status_code == 403 and "Over Qps" in response.text:
+                        print(f"⚠️⚠️⚠️ ERREUR: 'Developer Over Qps' - Trop de requêtes par seconde")
+                    else:
+                        print(f"❌ Erreur API: {response.status_code} - {response.text[:200]}")
+                        if search_metadata is not None:
+                            search_metadata['failure_reason'] = ['api_error']
+                            search_metadata['api_error'] = {
+                                'status_code': response.status_code,
+                                'error_message': response.text[:200]
+                            }
+                        
+                except Exception as e:
+                    print(f"❌ Exception lors de la requête: {str(e)}")
+                    
+                # Si nous arrivons ici, c'est que la requête a échoué
+                if attempt == max_retries - 1:
+                    return None
+            
+            return None
+        
+        print(f"📋 Paramètres de recherche:")
+        print(f"   - Origin: {origin_code}")
+        print(f"   - Destination: {destination_code}")
+        print(f"   - Date aller: {travel_date}")
+        if return_date:
+            print(f"   - Date retour: {return_date}")
+        print()
+        
+        # PRIORITÉ ABSOLUE : API Offers uniquement (pas FlightStatus)
+        # Documentation: https://developer.airfranceklm.com/products/api/offers/api-reference/paths/opendata-offers-v3-available-offers/post
+        print("\n🔍 RECHERCHE EXCLUSIVE AVEC API OFFERS v3/available-offers...")
+        
+        # L'endpoint correct est /opendata/offers/v3/available-offers (POST uniquement)
+        offers_url = "https://api.airfranceklm.com/opendata/offers/v3/available-offers"
+        
+        # Construire le body selon la documentation
+        # Structure: requestedConnections avec origin/destination en objets
+        requested_connections = [
+            {
+                "departureDate": travel_date,
+                "origin": {
+                    "code": origin_code,
+                    "type": "STOPOVER"
+                },
+                "destination": {
+                    "code": destination_code,
+                    "type": "STOPOVER"
+                }
+            }
+        ]
+        
+        # Si date retour, ajouter la connection retour
+        if return_date:
+            requested_connections.append({
+                "departureDate": return_date,
+                "origin": {
+                    "code": destination_code,
+                    "type": "STOPOVER"
+                },
+                "destination": {
+                    "code": origin_code,
+                    "type": "STOPOVER"
+                }
+            })
+        
+        # Body selon la documentation
+        offers_body = {
+            "commercialCabins": ["ALL"],
+            "bookingFlow": "LEISURE",
+            "passengers": [
+                {
+                    "id": 1,
+                    "type": "ADT"
+                }
+            ],
+            "requestedConnections": requested_connections
+        }
+        
+        # Headers selon la documentation (Content-Type: application/hal+json)
+        offers_headers = {
+            "API-Key": api_key,
+            "AFKL-TRAVEL-Host": "KL",  # Ou "AF" pour Air France
+            "Accept": "application/hal+json",
+            "Content-Type": "application/hal+json"  # IMPORTANT: hal+json selon la doc
+        }
+        
+        print(f"\n   🔍 POST vers {offers_url}")
+        print(f"   📋 Body: {json.dumps(offers_body, indent=2)}")
+        
+        offers_response = None
+        try:
+            # Utiliser data= avec json.dumps pour avoir application/hal+json
+            response = requests.post(
+                offers_url,
+                data=json.dumps(offers_body),  # Envoyer comme string JSON
+                headers=offers_headers,
+                timeout=30
+            )
+            print(f"   📊 Code de statut: {response.status_code}")
+            
+            if response.status_code == 200:
+                offers_response = response.json()
+                print(f"   ✅ Réponse reçue avec succès!")
+            elif response.status_code == 404:
+                print(f"   ❌ Endpoint 404 - vérifiez que l'endpoint est correct")
+                print(f"   📋 Réponse: {response.text[:500]}")
+            elif response.status_code == 403:
+                print(f"   ⚠️ Erreur 403 - vérifiez vos credentials")
+                print(f"   📋 Réponse: {response.text[:500]}")
+            else:
+                print(f"   ❌ Erreur {response.status_code}: {response.text[:500]}")
+        except Exception as e:
+            print(f"   ❌ Exception: {type(e).__name__}: {str(e)[:200]}")
+        
+        if offers_response:
+            print("✅ Réponse de l'API Offers v3 reçue!")
+            print(f"   📋 Structure réponse: {list(offers_response.keys())[:10]}")
+            
+            # Traiter la réponse HAL+JSON selon la documentation
+            # La réponse contient: recommendations, flightProducts, connections, etc.
+            flights = []
+            
+            # Chercher dans recommendations (première option)
+            recommendations = offers_response.get('recommendations', [])
+            if recommendations:
+                print(f"📋 {len(recommendations)} recommandation(s) trouvée(s)")
+                for rec_idx, rec in enumerate(recommendations[:3], 1):  # Prendre les 3 premiers
+                    print(f"   🔍 Traitement recommandation {rec_idx}...")
+                    
+                    # Les flightProducts contiennent les connections
+                    flight_products = rec.get('flightProducts', [])
+                    if flight_products:
+                        print(f"      📋 {len(flight_products)} flightProduct(s) dans cette recommandation")
+                        for product_idx, product in enumerate(flight_products[:2], 1):  # Prendre les 2 premiers products
+                            print(f"         🔍 Traitement flightProduct {product_idx}...")
+                            
+                            # Les connections sont dans le flightProduct
+                            connections = product.get('connections', [])
+                            if connections:
+                                print(f"            📋 {len(connections)} connection(s) dans ce product")
+                                # connections est un tableau de tableaux (une connection par direction)
+                                for conn_group_idx, conn_group in enumerate(connections):
+                                    if isinstance(conn_group, list):
+                                        for conn_idx, connection in enumerate(conn_group[:1], 1):
+                                            print(f"               🔍 Extraction connection {conn_group_idx}-{conn_idx}...")
+                                            flight_info = self._extract_flight_info_from_offer_response(connection, origin_code, destination_code)
+                                            if flight_info:
+                                                print(f"                  ✅ Vol extrait: {flight_info['flight_number']}")
+                                                flights.append(flight_info)
+                                    elif isinstance(conn_group, dict):
+                                        print(f"               🔍 Extraction connection {conn_group_idx}...")
+                                        flight_info = self._extract_flight_info_from_offer_response(conn_group, origin_code, destination_code)
+                                        if flight_info:
+                                            print(f"                  ✅ Vol extrait: {flight_info['flight_number']}")
+                                            flights.append(flight_info)
+                    
+                    # Si pas de flightProducts, essayer directement les connections dans la recommendation
+                    if not flights:
+                        connections = rec.get('connections', [])
+                        if connections:
+                            print(f"      📋 {len(connections)} connection(s) directe(s) dans cette recommandation")
+                            for conn_group in connections:
+                                if isinstance(conn_group, list):
+                                    for connection in conn_group[:1]:
+                                        flight_info = self._extract_flight_info_from_offer_response(connection, origin_code, destination_code)
+                                        if flight_info:
+                                            flights.append(flight_info)
+                                elif isinstance(conn_group, dict):
+                                    flight_info = self._extract_flight_info_from_offer_response(conn_group, origin_code, destination_code)
+                                    if flight_info:
+                                        flights.append(flight_info)
+            
+            # Si pas de recommendations, chercher dans flightProducts directement
+            if not flights:
+                flight_products = offers_response.get('flightProducts', [])
+                if flight_products:
+                    print(f"📋 {len(flight_products)} flightProduct(s) trouvé(s)")
+                    for product in flight_products[:3]:
+                        flight_info = self._extract_flight_info_from_offer_response(product, origin_code, destination_code)
+                        if flight_info:
+                            flights.append(flight_info)
+            
+            # Fallback: chercher dans connections directement (au niveau supérieur de la réponse)
+            if not flights:
+                connections = offers_response.get('connections', [])
+                if connections:
+                    print(f"📋 {len(connections)} connection(s) trouvée(s) au niveau supérieur")
+                    # Afficher la structure complète d'une connection pour debug
+                    if connections and len(connections) > 0:
+                        first_conn = connections[0]
+                        if isinstance(first_conn, list) and len(first_conn) > 0:
+                            first_conn = first_conn[0]
+                        print(f"   📋 Structure première connection (complète): {json.dumps(first_conn, indent=2)[:1500]}")
+                    
+                    for conn_idx, conn in enumerate(connections[:2], 1):  # Prendre les 2 premières
+                        if isinstance(conn, list):
+                            for c_idx, c in enumerate(conn[:2], 1):
+                                print(f"   🔍 Extraction connection top-level {conn_idx}-{c_idx}...")
+                                flight_info = self._extract_flight_info_from_offer_response(c, origin_code, destination_code)
+                                if flight_info:
+                                    flights.append(flight_info)
+                        else:
+                            print(f"   🔍 Extraction connection top-level {conn_idx}...")
+                            flight_info = self._extract_flight_info_from_offer_response(conn, origin_code, destination_code)
+                            if flight_info:
+                                flights.append(flight_info)
+            
+            # Si toujours pas de vols, chercher dans _links (HAL+JSON peut avoir des liens vers les détails)
+            if not flights and offers_response.get('_links'):
+                print(f"📋 _links trouvé - les détails des vols peuvent être dans les liens HAL+JSON")
+                links = offers_response['_links']
+                print(f"   📋 Clés dans _links: {list(links.keys())[:10]}")
+                # Note: Suivre les liens nécessiterait des requêtes supplémentaires
+                # Pour l'instant on ne le fait pas, mais on peut logger les URLs disponibles
+            
+            if flights:
+                print(f"✅ {len(flights)} vol(s) extrait(s) depuis l'API Offers")
+                return flights
+            else:
+                print(f"⚠️ Aucun vol extrait - structure de réponse inattendue")
+                # Sauvegarder la réponse complète dans un fichier pour debug
+                try:
+                    debug_file = '/tmp/airfrance_klm_response_debug.json'
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        json.dump(offers_response, f, indent=2, ensure_ascii=False)
+                    print(f"   💡 Réponse complète sauvegardée dans {debug_file} pour analyse")
+                except Exception as e:
+                    print(f"   ⚠️ Impossible de sauvegarder: {str(e)}")
+                print(f"   📋 Réponse complète (premiers 3000 chars): {json.dumps(offers_response, indent=2)[:3000]}")
+        
+        # Si toutes les tentatives Offers échouent
+        print("\n❌ Aucun vol trouvé avec l'API Offers")
+        if offers_response:
+            print("⚠️⚠️⚠️ L'API a retourné une réponse mais aucun vol n'a pu être extrait")
+            print("💡 La structure de la réponse peut être différente de celle attendue")
+            print("💡 Vérifiez les logs ci-dessus pour voir la structure exacte de la réponse")
+        else:
+            print("⚠️⚠️⚠️ L'API Offers n'a pas retourné de réponse valide")
+            print("💡 Vérifiez vos credentials et que l'endpoint est correct")
+        
+        # NE PLUS UTILISER FlightStatus - uniquement Offers
+        if search_metadata is not None:
+            if offers_response:
+                search_metadata['failure_reason'] = ['offers_api_responded_but_no_flights_extracted']
+            else:
+                search_metadata['failure_reason'] = ['offers_api_failed', 'no_response']
+        print("=" * 80)
+        return None
+        
+    def _extract_flight_info_from_offer_response(self, connection_or_product, origin_code, destination_code):
+        """
+        Extrait les informations de vol depuis une connection ou flightProduct de la réponse Offers API.
+        Structure attendue (d'après les logs) :
+        - segments[].marketingFlight.number
+        - segments[].departureDateTime
+        - segments[].arrivalDateTime
+        - segments[].origin.code
+        - segments[].destination.code
+        - segments[].marketingFlight.carrier.name/code
+        """
+        try:
+            # Structure HAL+JSON peut varier, essayer plusieurs formats
+            flight_number = None
+            airline_name = "Air France-KLM"
+            departure_airport = origin_code
+            departure_time = None
+            arrival_airport = destination_code
+            arrival_time = None
+            
+            # Extraire depuis segments (structure Offers API avec marketingFlight)
+            segments = connection_or_product.get('flightSegments', []) or connection_or_product.get('segments', [])
+            if segments:
+                # Prendre le premier segment pour départ et dernier pour arrivée
+                first_segment = segments[0] if segments else {}
+                last_segment = segments[-1] if segments else first_segment
+                
+                # IMPORTANT: Structure Offers API utilise marketingFlight.number (pas flightNumber)
+                # Format: marketingFlight: {number: "2016", carrier: {code: "KL", name: "KLM"}}
+                marketing_flight = first_segment.get('marketingFlight', {})
+                if isinstance(marketing_flight, dict):
+                    flight_num = marketing_flight.get('number')
+                    carrier = marketing_flight.get('carrier', {})
+                    carrier_code = None
+                    if isinstance(carrier, dict):
+                        airline_name = carrier.get('name', carrier.get('code', 'Air France-KLM'))
+                        carrier_code = carrier.get('code')
+                    
+                    # Formater le numéro de vol avec le code compagnie (ex: KL2016)
+                    if flight_num and carrier_code:
+                        flight_number = f"{carrier_code}{flight_num}"
+                    elif flight_num:
+                        flight_number = str(flight_num)
+                    
+                    # Si pas de flightNumber, essayer operatingFlight
+                    if not flight_number:
+                        operating_flight = first_segment.get('operatingFlight', {})
+                        if isinstance(operating_flight, dict):
+                            flight_num = operating_flight.get('number')
+                            op_carrier = operating_flight.get('carrier', {})
+                            if isinstance(op_carrier, dict):
+                                op_carrier_code = op_carrier.get('code')
+                                if flight_num and op_carrier_code:
+                                    flight_number = f"{op_carrier_code}{flight_num}"
+                                elif flight_num:
+                                    flight_number = str(flight_num)
+                                if not airline_name or airline_name == 'Air France-KLM':
+                                    airline_name = op_carrier.get('name', op_carrier.get('code', 'Air France-KLM'))
+                
+                # Si toujours pas de flightNumber, essayer les autres formats
+                if not flight_number:
+                    flight_number = (
+                        first_segment.get('flightNumber') or 
+                        first_segment.get('number') or 
+                        first_segment.get('flight', {}).get('number') if isinstance(first_segment.get('flight'), dict) else None
+                    )
+                
+                # Départ depuis le premier segment
+                # Format Offers API: origin: {code: "CDG"}, departureDateTime: "2025-11-23T16:55:00"
+                origin_info = first_segment.get('origin', {})
+                if isinstance(origin_info, dict):
+                    departure_airport = origin_info.get('code') or origin_info.get('iata') or origin_code
+                
+                # Départ time depuis departureDateTime
+                departure_time = first_segment.get('departureDateTime') or first_segment.get('departure') or first_segment.get('departureInformation', {}).get('datetime')
+                if not departure_time and isinstance(first_segment.get('departure'), dict):
+                    departure_time = first_segment['departure'].get('datetime') or first_segment['departure'].get('time') or first_segment['departure'].get('scheduled')
+                
+                # Arrivée depuis le dernier segment
+                destination_info = last_segment.get('destination', {})
+                if isinstance(destination_info, dict):
+                    arrival_airport = destination_info.get('code') or destination_info.get('iata') or destination_code
+                
+                # Arrivée time depuis arrivalDateTime
+                arrival_time = last_segment.get('arrivalDateTime') or last_segment.get('arrival') or last_segment.get('arrivalInformation', {}).get('datetime')
+                if not arrival_time and isinstance(last_segment.get('arrival'), dict):
+                    arrival_time = last_segment['arrival'].get('datetime') or last_segment['arrival'].get('time') or last_segment['arrival'].get('scheduled')
+            
+            # Format 2: champs directs dans connection/product (fallback)
+            if not flight_number:
+                flight_number = (
+                    connection_or_product.get('flightNumber') or 
+                    connection_or_product.get('number') or
+                    connection_or_product.get('flight', {}).get('number') if isinstance(connection_or_product.get('flight'), dict) else None
+                )
+            
+            # Compagnie depuis connection/product (fallback)
+            if airline_name == 'Air France-KLM':
+                airline_info = connection_or_product.get('airline') or connection_or_product.get('flight', {}).get('airline')
+                if airline_info:
+                    if isinstance(airline_info, dict):
+                        airline_name = airline_info.get('name', 'Air France-KLM')
+                    else:
+                        airline_name = airline_info
+            
+            # Formater le temps si nécessaire
+            if departure_time:
+                dt = self._parse_iso_datetime(departure_time)
+                departure_time = dt.strftime('%Y-%m-%d %H:%M') if dt else str(departure_time)
+            else:
+                departure_time = 'N/A'
+            
+            if arrival_time:
+                dt = self._parse_iso_datetime(arrival_time)
+                arrival_time = dt.strftime('%Y-%m-%d %H:%M') if dt else str(arrival_time)
+            else:
+                arrival_time = 'N/A'
+            
+            if flight_number:
+                return {
+                    'flight_number': str(flight_number),
+                    'airline': airline_name,
+                    'departure_airport': departure_airport,
+                    'departure_time': departure_time,
+                    'arrival_airport': arrival_airport,
+                    'arrival_time': arrival_time
+                }
+            return None
+        except Exception as e:
+            print(f"   ⚠️ Erreur extraction info vol: {type(e).__name__}: {str(e)[:200]}")
+            import traceback
+            print(f"   📋 Traceback: {traceback.format_exc()[:500]}")
+            return None
+    
+    def _parse_iso_datetime(self, datetime_str):
+        """
+        Parse une chaîne de date/heure ISO 8601 en objet datetime.
+        Gère les fuseaux horaires.
+        """
+        try:
+            import dateutil.parser
+            
+            dt = dateutil.parser.parse(datetime_str)
+            return dt
+        except Exception as e:
+            print(f"❌ Erreur lors du parsing de la date: {str(e)}")
+            return None
+    
+    def _search_flights_with_aviationstack(self, origin_code, destination_code, travel_date, return_date=None):
+        """
+        Recherche de VRAIS vols avec Aviationstack API (FALLBACK).
+        Retourne des vols réels avec horaires, numéros de vol, compagnies, prix.
+        """
+        from django.conf import settings
+        
+        api_key = getattr(settings, 'AVIATIONSTACK_API_KEY', None)
+        if not api_key:
+            print("⚠️ AVIATIONSTACK_API_KEY non configurée - fallback désactivé")
+            return None
         
         try:
-            prompt = f"""Crée une offre de voyage DÉTAILLÉE et PROFESSIONNELLE pour : {text_input}
+            print(f"✈️ Recherche de VRAIS vols avec Aviationstack: {origin_code} → {destination_code}")
+            print(f"   Date aller: {travel_date}")
+            if return_date:
+                print(f"   Date retour: {return_date}")
+            
+            # API Aviationstack pour chercher des vols réels
+            base_url = "http://api.aviationstack.com/v1/flights"
+            
+            flights_data = []
+            
+            # Rechercher le vol aller
+            params = {
+                'access_key': api_key,
+                'dep_iata': origin_code,
+                'arr_iata': destination_code,
+                'flight_date': travel_date,  # Format YYYY-MM-DD
+            }
+            
+            print(f"   📡 Requête API Aviationstack pour vol aller...")
+            response = requests.get(base_url, params=params, timeout=15)
+            
+            print(f"   📊 Code de statut: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Vérifier les erreurs de l'API
+                if data.get('error'):
+                    error_info = data.get('error', {})
+                    print(f"   ❌ Erreur API Aviationstack: {error_info.get('message', 'Erreur inconnue')}")
+                    if error_info.get('code') == 104:
+                        print(f"   ⚠️ Limite de requêtes mensuelle atteinte (500 requêtes gratuites)")
+                    elif error_info.get('code') == 101:
+                        print(f"   ⚠️ Clé API invalide - vérifiez AVIATIONSTACK_API_KEY dans .env")
+                    return None
+                
+                if data.get('data') and len(data['data']) > 0:
+                    print(f"   ✅ {len(data['data'])} vol(s) RÉEL(S) trouvé(s) pour {origin_code} → {destination_code}")
+                    
+                    # Prendre les 3 premiers vols (directs de préférence)
+                    for flight in data['data'][:3]:
+                        flight_info = {
+                            'flight_number': flight.get('flight', {}).get('number', 'N/A'),
+                            'airline': flight.get('airline', {}).get('name', 'N/A'),
+                            'departure_airport': flight.get('departure', {}).get('iata', origin_code),
+                            'departure_time': flight.get('departure', {}).get('scheduled', 'N/A'),
+                            'arrival_airport': flight.get('arrival', {}).get('iata', destination_code),
+                            'arrival_time': flight.get('arrival', {}).get('scheduled', 'N/A'),
+                            'status': flight.get('flight_status', 'scheduled'),
+                            'is_direct': not flight.get('departure', {}).get('airport', '') != flight.get('arrival', {}).get('airport', ''),
+                        }
+                        flights_data.append(flight_info)
+                        print(f"      ✈️ Vol trouvé: {flight_info['airline']} {flight_info['flight_number']} - {flight_info['departure_time']} → {flight_info['arrival_time']}")
+                else:
+                    print(f"   ⚠️ Aucun vol trouvé dans la réponse Aviationstack pour {origin_code} → {destination_code}")
+            else:
+                error_text = response.text[:500] if hasattr(response, 'text') else str(response)
+                print(f"   ❌ Erreur API Aviationstack (HTTP {response.status_code}): {error_text}")
+                try:
+                    error_data = response.json()
+                    if error_data.get('error'):
+                        print(f"   📋 Détails: {error_data.get('error')}")
+                except:
+                    pass
+            
+            # Rechercher le vol retour si date retour fournie
+            if return_date and flights_data:
+                params_return = {
+                    'access_key': api_key,
+                    'dep_iata': destination_code,
+                    'arr_iata': origin_code,
+                    'flight_date': return_date,
+                }
+                
+                print(f"   📡 Requête API Aviationstack pour vol retour...")
+                response_return = requests.get(base_url, params=params_return, timeout=15)
+                
+                if response_return.status_code == 200:
+                    data_return = response_return.json()
+                    if data_return.get('data') and len(data_return['data']) > 0:
+                        # Prendre le premier vol retour
+                        flight_return = data_return['data'][0]
+                        return_flight_info = {
+                            'flight_number': flight_return.get('flight', {}).get('number', 'N/A'),
+                            'airline': flight_return.get('airline', {}).get('name', 'N/A'),
+                            'departure_airport': flight_return.get('departure', {}).get('iata', destination_code),
+                            'departure_time': flight_return.get('departure', {}).get('scheduled', 'N/A'),
+                            'arrival_airport': flight_return.get('arrival', {}).get('iata', origin_code),
+                            'arrival_time': flight_return.get('arrival', {}).get('scheduled', 'N/A'),
+                            'status': flight_return.get('flight_status', 'scheduled'),
+                        }
+                        flights_data.append(return_flight_info)
+                        print(f"      ✈️ Vol retour trouvé: {return_flight_info['airline']} {return_flight_info['flight_number']}")
+            
+            if flights_data:
+                print(f"✅ {len(flights_data)} vol(s) RÉEL(S) obtenu(s) depuis Aviationstack")
+                return flights_data
+            else:
+                print("⚠️ Aucun vol trouvé avec Aviationstack")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Erreur recherche vols Aviationstack: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:300]}")
+            return None
+    
+    def _search_flights_smart(self, flight_input, search_metadata=None):
+        """
+        Recherche intelligente de vols avec parsing automatique (GDS, numéro de vol, texte libre).
+        Remplace l'ancienne fonction Air France-KLM.
+        
+        Args:
+            flight_input: Texte saisi par l'utilisateur (format libre)
+            search_metadata: Dict pour stocker les métadonnées
+        
+        Returns:
+            Liste de dicts avec les vols trouvés ou None
+        """
+        from api.smart_flight_search import SmartFlightSearch
+        from django.conf import settings
+        
+        if not flight_input:
+            return None
+        
+        try:
+            use_test = getattr(settings, 'AMADEUS_USE_TEST', True)
+            smart_search = SmartFlightSearch(use_test=use_test)
+            
+            result = smart_search.search(flight_input)
+            
+            if search_metadata is not None:
+                search_metadata['parsed_data'] = result.get('parsed_data')
+                search_metadata['search_strategy'] = result.get('search_strategy')
+                search_metadata['source'] = 'smart_search_amadeus'
+                
+                if result.get('flights_found'):
+                    search_metadata['real_flights_count'] = len(result['flights_found'])
+                    search_metadata['has_valid_flight_info'] = True
+                else:
+                    search_metadata['real_flights_count'] = 0
+                    search_metadata['has_valid_flight_info'] = False
+            
+            return result.get('flights_found')
+        
+        except Exception as e:
+            print(f"❌ Erreur recherche intelligente: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            if search_metadata:
+                search_metadata['failure_reason'] = [f'smart_search_error: {str(e)}']
+            return None
+    
+    def _extract_airport_codes(self, text_input, travel_date=None, for_origin=False):
+        """
+        Extrait les codes d'aéroport depuis le texte (ex: Paris → CDG, Bali → DPS)
+        Si for_origin=True, extrait le code pour l'origine (première valeur du tuple)
+        Si for_origin=False (défaut), extrait le code pour la destination (deuxième valeur du tuple)
+        """
+        # Mapping villes/destinations → codes IATA (plus complet et avec accents)
+        # IMPORTANT: Trier par longueur décroissante pour détecter d'abord les noms les plus longs
+        airport_codes = {
+            # France
+            'paris': 'CDG', 'cdg': 'CDG', 'orly': 'ORY', 'ory': 'ORY',
+            # Belgique
+            'belgique': 'BRU', 'bruxelles': 'BRU', 'brussels': 'BRU', 'bru': 'BRU',
+            'charleroi': 'CRL', 'crl': 'CRL', 'liège': 'LGG', 'liege': 'LGG', 'lgg': 'LGG',
+            'anvers': 'ANR', 'antwerp': 'ANR', 'anr': 'ANR',
+            # Indonésie
+            'bali': 'DPS', 'denpasar': 'DPS', 'dps': 'DPS', 'indonesie': 'DPS', 'indonésie': 'DPS',
+            'jakarta': 'CGK', 'cgk': 'CGK', 'yogyakarta': 'YIA', 'yia': 'YIA',
+            # Thaïlande
+            'thailande': 'BKK', 'bangkok': 'BKK', 'bkk': 'BKK', 'thaïlande': 'BKK',
+            'phuket': 'HKT', 'hkt': 'HKT', 'chiang mai': 'CNX', 'chiangmai': 'CNX', 'cnx': 'CNX',
+            # Grèce
+            'grèce': 'ATH', 'grece': 'ATH', 'athènes': 'ATH', 'athenes': 'ATH', 'ath': 'ATH',
+            'mykonos': 'JMK', 'jmk': 'JMK', 'santorin': 'JTR', 'santorini': 'JTR', 'jtr': 'JTR',
+            # Italie
+            'italie': 'FCO', 'rome': 'FCO', 'fco': 'FCO', 'milan': 'MXP', 'mxp': 'MXP',
+            'venise': 'VCE', 'venice': 'VCE', 'vce': 'VCE', 'florence': 'FLR', 'flr': 'FLR',
+            # Espagne
+            'espagne': 'MAD', 'madrid': 'MAD', 'mad': 'MAD', 'barcelone': 'BCN', 'bcn': 'BCN',
+            'seville': 'SVQ', 'sevilla': 'SVQ', 'svq': 'SVQ', 'valencia': 'VLC', 'vlc': 'VLC',
+            # Maroc
+            'maroc': 'CMN', 'casablanca': 'CMN', 'cmn': 'CMN', 'marrakech': 'RAK', 'rak': 'RAK',
+            'agadir': 'AGA', 'aga': 'AGA', 'tanger': 'TNG', 'tangier': 'TNG', 'tng': 'TNG',
+            # Émirats
+            'dubaï': 'DXB', 'dubai': 'DXB', 'dxb': 'DXB', 'abu dhabi': 'AUH', 'auh': 'AUH',
+            # Japon
+            'japon': 'NRT', 'tokyo': 'NRT', 'narita': 'NRT', 'nrt': 'NRT', 'osaka': 'KIX',
+            # UK
+            'londres': 'LHR', 'london': 'LHR', 'lhr': 'LHR',
+            # Turquie
+            'istanbul': 'IST', 'ist': 'IST',
+            # USA
+            'new york': 'JFK', 'jfk': 'JFK', 'nyc': 'JFK',
+            # Autres destinations populaires
+            'lisbonne': 'LIS', 'lis': 'LIS',
+            'amsterdam': 'AMS', 'ams': 'AMS',
+            'berlin': 'BER', 'ber': 'BER',
+            'vienne': 'VIE', 'vie': 'VIE',
+            'prague': 'PRG', 'prg': 'PRG',
+            'budapest': 'BUD', 'bud': 'BUD',
+            'venise': 'VCE', 'vce': 'VCE',
+            'florence': 'FLR', 'flr': 'FLR',
+            'naples': 'NAP', 'nap': 'NAP',
+        }
+        
+        text_lower = text_input.lower()
+        origin_code = 'CDG'  # Paris par défaut
+        destination_code = None
+        
+        print(f"   🔍 Recherche de codes aéroport dans: '{text_input[:100]}'")
+        
+        # Trouver la ville/destination dans le texte
+        city_matches = []
+        for city, code in airport_codes.items():
+            if city in text_lower:
+                city_matches.append((city, code))
+        
+        # Trier par longueur (les noms plus longs sont plus spécifiques)
+        city_matches.sort(key=lambda x: len(x[0]), reverse=True)
+        
+        if city_matches:
+            # Prendre la première correspondance (la plus longue/specifique)
+            matched_city, matched_code = city_matches[0]
+            
+            if for_origin:
+                # Si on cherche l'origine, on retourne le code trouvé comme origine
+                origin_code = matched_code
+                print(f"   ✅ Origine détectée: '{matched_city}' → code aéroport {matched_code}")
+            else:
+                # Si on cherche la destination, on exclut Paris (c'est l'origine par défaut)
+                if matched_city != 'paris' and matched_code != 'CDG':
+                    destination_code = matched_code
+                    print(f"   ✅ Destination détectée: '{matched_city}' → code aéroport {matched_code}")
+                else:
+                    print(f"   ⚠️ 'Paris' détecté mais c'est l'origine par défaut - pas de destination trouvée")
+        else:
+            if for_origin:
+                print(f"   ⚠️ Aucune origine connue détectée dans le texte - utilisation de Paris (CDG) par défaut")
+            else:
+                print(f"   ❌ Aucune destination connue détectée dans le texte")
+                print(f"   💡 Destinations supportées: belgique, bali, thailande, grèce, italie, espagne, maroc, dubaï, japon, londres, istanbul, new york, etc.")
+        
+        return origin_code, destination_code
+    
+    def _search_real_time_info(self, query, max_results=3):
+        """
+        Recherche d'informations en temps réel via Tavily (si disponible).
+        Utile pour rechercher des vols, horaires, prix réels.
+        """
+        if not TAVILY_AVAILABLE:
+            return None
+        
+        try:
+            tavily_api_key = getattr(settings, 'TAVILY_API_KEY', None)
+            if not tavily_api_key:
+                print("⚠️ TAVILY_API_KEY non configurée dans settings.py")
+                return None
+            
+            tavily = TavilyClient(api_key=tavily_api_key)
+            response = tavily.search(
+                query=query,
+                search_depth="advanced",  # Recherche approfondie
+                max_results=max_results,
+                include_answer=True,
+                include_raw_content=True
+            )
+            
+            results = []
+            if response.get('results'):
+                for result in response['results'][:max_results]:
+                    results.append({
+                        "title": result.get('title', ''),
+                        "url": result.get('url', ''),
+                        "content": result.get('content', '')[:1000],  # Limiter à 1000 chars
+                        "raw_content": result.get('raw_content', '')[:1500] if result.get('raw_content') else ''
+                    })
+            
+            # Ajouter aussi la réponse générée par Tavily si disponible
+            if response.get('answer'):
+                results.append({
+                    "title": "Réponse synthétisée",
+                    "url": "",
+                    "content": response['answer'],
+                    "raw_content": ""
+                })
+            
+            return results
+        except Exception as e:
+            print(f"❌ Erreur recherche Tavily: {str(e)}")
+            return None
+    
+    def _scrape_hotels_search_results(self, url):
+        """
+        Scrape une page de RECHERCHE d'hôtels (plusieurs résultats) avec Playwright.
+        Extrait les informations de plusieurs hôtels pour laisser ChatGPT choisir.
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return None
+        
+        try:
+            print(f"🏨 Scraping de RÉSULTATS DE RECHERCHE d'hôtels avec Playwright pour: {url}")
+            
+            with sync_playwright() as p:
+                print(f"   🚀 Lancement du navigateur Chromium...")
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                
+                # User-Agent réaliste
+                page.set_extra_http_headers({
+                    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                })
+                
+                print(f"   📡 Chargement de la page de recherche...")
+                page.goto(url, wait_until='networkidle', timeout=45000)  # Timeout augmenté
+                
+                # Attendre plus longtemps pour que les résultats se chargent
+                print(f"   ⏱️ Attente du chargement des résultats d'hôtels (8 secondes)...")
+                page.wait_for_timeout(8000)
+                
+                # Extraire le contenu HTML complet
+                content = page.content()
+                
+                # Prendre des screenshots pour debug si nécessaire (optionnel)
+                # page.screenshot(path=f"debug_search_{int(time.time())}.png")
+                
+                browser.close()
+                
+                # Parser avec BeautifulSoup
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Supprimer les éléments inutiles
+                for element in soup(["script", "style", "nav", "footer", "header"]):
+                    element.decompose()
+                
+                # Extraire le texte complet (contient infos sur plusieurs hôtels)
+                text_content = soup.get_text(separator=' ', strip=True)
+                
+                # Nettoyer
+                lines = (line.strip() for line in text_content.splitlines())
+                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                text_content = ' '.join(chunk for chunk in chunks if chunk)
+                
+                # Construire un résumé structuré pour ChatGPT
+                result = f"""🏨 RÉSULTATS DE RECHERCHE D'HÔTELS (PLUSIEURS OPTIONS DISPONIBLES)
+
+Cette page contient PLUSIEURS HÔTELS disponibles pour les dates recherchées. 
+ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
+
+📋 CONTENU EXTRAIT :
+{text_content[:5000]}
+
+💡 INSTRUCTIONS POUR CHATGPT :
+- Plusieurs hôtels sont listés ci-dessus avec leurs caractéristiques (nom, prix, étoiles, équipements, localisation, notes)
+- Analyse TOUTES les options disponibles
+- Choisis le(s) meilleur(s) hôtel(s) en fonction du rapport qualité/prix, localisation, services
+- Utilise les NOMS EXACTS, PRIX RÉELS, et DESCRIPTIONS EXACTES des hôtels mentionnés
+- Si plusieurs hôtels sont intéressants pour différentes étapes du circuit, tu peux les utiliser tous
+"""
+                
+                if text_content and len(text_content.strip()) > 200:
+                    print(f"✅ Scraping recherche d'hôtels réussi: {len(text_content)} caractères")
+                    preview = text_content[:300].replace('\n', ' ')
+                    print(f"   📄 Preview: {preview}...")
+                    return result
+                else:
+                    print(f"⚠️ Contenu recherche trop court: {len(text_content) if text_content else 0} caractères")
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ Erreur scraping recherche d'hôtels: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:500]}")
+            return None
+    
+    def _scrape_with_playwright(self, url):
+        """
+        Utilise Playwright (navigateur headless) pour scraper les sites JavaScript.
+        Exécute le JavaScript et récupère le contenu rendu.
+        
+        DÉTECTE automatiquement si c'est une page de recherche (plusieurs hôtels)
+        ou une page d'hôtel unique et adapte le scraping.
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return None
+        
+        # 🔍 Détection automatique : Page de recherche vs Page unique
+        is_search_page = any(indicator in url.lower() for indicator in [
+            'redirect.htm', 'search', 'results', 'recherche', 'liste', 
+            'toPolygonCode', 'startDate', 'endDate', 'nbAdults'
+        ])
+        
+        if is_search_page:
+            print(f"🔍 Détection : PAGE DE RECHERCHE (plusieurs hôtels) → Mode extraction multiple")
+            return self._scrape_hotels_search_results(url)
+        else:
+            print(f"🔍 Détection : PAGE UNIQUE (hôtel spécifique) → Mode extraction classique")
+        
+        try:
+            print(f"🌐 Tentative de scraping via Playwright (navigateur headless) pour: {url}")
+            
+            with sync_playwright() as p:
+                print(f"   🚀 Lancement du navigateur Chromium...")
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                
+                # Définir un User-Agent réaliste
+                page.set_extra_http_headers({
+                    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+                })
+                
+                print(f"   📡 Chargement de la page: {url}")
+                # Attendre que le contenu soit chargé
+                page.goto(url, wait_until='networkidle', timeout=30000)
+                
+                # Attendre un peu pour que le JavaScript se charge
+                page.wait_for_timeout(2000)  # 2 secondes supplémentaires
+                
+                # Extraire le contenu texte
+                print(f"   📄 Extraction du contenu...")
+                content = page.content()
+                
+                # Parser avec BeautifulSoup pour extraire le texte proprement
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Supprimer les scripts et styles
+                for script in soup(["script", "style", "nav", "footer", "header"]):
+                    script.decompose()
+                
+                # Extraire meta description
+                meta_desc = ""
+                meta_tag = soup.find("meta", attrs={"name": "description"})
+                if meta_tag and meta_tag.get("content"):
+                    meta_desc = meta_tag.get("content")
+                
+                # Extraire le texte principal
+                text_content = soup.get_text(separator=' ', strip=True)
+                
+                # Nettoyer le texte
+                lines = (line.strip() for line in text_content.splitlines())
+                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                text_content = ' '.join(chunk for chunk in chunks if chunk)
+                
+                # Combiner
+                full_content = ""
+                if meta_desc:
+                    full_content = f"Description: {meta_desc}\n\n"
+                full_content += text_content
+                
+                browser.close()
+                
+                if full_content and len(full_content.strip()) > 50:
+                    print(f"✅ Scraping Playwright réussi: {len(full_content)} caractères")
+                    preview = full_content[:200].replace('\n', ' ')
+                    print(f"   📄 Preview: {preview}...")
+                    return full_content[:3000] if len(full_content) > 3000 else full_content
+                else:
+                    print(f"⚠️ Contenu Playwright trop court: {len(full_content) if full_content else 0} caractères")
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ Erreur scraping Playwright pour {url}: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:500]}")
+            return None
+    
+    def _extract_images_with_playwright(self, url):
+        """
+        Extrait les URLs des images depuis une page avec Playwright.
+        DÉTECTE automatiquement si c'est une page de recherche ou page unique.
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return []
+        
+        # Détection automatique du type de page
+        is_search_page = any(indicator in url.lower() for indicator in [
+            'redirect.htm', 'search', 'results', 'recherche', 'liste', 
+            'toPolygonCode', 'startDate', 'endDate', 'nbAdults'
+        ])
+        
+        limit = 20 if is_search_page else 10  # Plus d'images pour les pages de recherche
+        wait_time = 8000 if is_search_page else 2000  # Attendre plus longtemps pour recherche
+        
+        try:
+            print(f"   🖼️ Extraction des images avec Playwright...")
+            if is_search_page:
+                print(f"   🏨 Page de recherche détectée → Extraction de {limit} images (plusieurs hôtels)")
+            
+            images = []
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.set_extra_http_headers({
+                    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+                })
+                
+                page.goto(url, wait_until='networkidle', timeout=45000)
+                page.wait_for_timeout(wait_time)
+                
+                # Extraire toutes les images
+                img_elements = page.query_selector_all('img')
+                
+                for img in img_elements:
+                    src = img.get_attribute('src')
+                    if not src:
+                        # Essayer data-src (lazy loading)
+                        src = img.get_attribute('data-src')
+                    if not src:
+                        # Essayer data-lazy-src
+                        src = img.get_attribute('data-lazy-src')
+                    
+                    if src:
+                        # Convertir les URLs relatives en absolues
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            from urllib.parse import urljoin
+                            src = urljoin(url, src)
+                        elif not src.startswith('http'):
+                            from urllib.parse import urljoin
+                            src = urljoin(url, src)
+                        
+                        # Filtrer les images trop petites (icônes, logos, etc.)
+                        try:
+                            width = img.get_attribute('width')
+                            height = img.get_attribute('height')
+                            if width and height:
+                                if int(width) < 100 or int(height) < 100:
+                                    continue
+                        except:
+                            pass
+                        
+                        # Filtrer les images de tracking/pixel (moins strict pour pages de recherche)
+                        skip_patterns = ['pixel', 'tracking', 'analytics', 'beacon']
+                        if not is_search_page:
+                            skip_patterns.extend(['logo', 'icon'])
+                        
+                        if any(skip in src.lower() for skip in skip_patterns):
+                            continue
+                        
+                        images.append(src)
+                
+                browser.close()
+                
+            # Dédoublonner et limiter
+            unique_images = list(dict.fromkeys(images))[:limit]
+            print(f"   ✅ {len(unique_images)} image(s) extraite(s)")
+            return unique_images
+            
+        except Exception as e:
+            print(f"   ⚠️ Erreur extraction images Playwright: {str(e)}")
+            return []
+    
+    def _extract_images_from_url(self, url):
+        """
+        Extrait les URLs des images depuis une page avec BeautifulSoup.
+        """
+        try:
+            print(f"   🖼️ Extraction des images avec BeautifulSoup...")
+            images = []
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True, verify=False)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                img_tags = soup.find_all('img')
+                
+                for img in img_tags:
+                    src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                    if src:
+                        # Convertir les URLs relatives en absolues
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            from urllib.parse import urljoin
+                            src = urljoin(url, src)
+                        elif not src.startswith('http'):
+                            from urllib.parse import urljoin
+                            src = urljoin(url, src)
+                        
+                        # Filtrer les images trop petites et de tracking
+                        if any(skip in src.lower() for skip in ['pixel', 'tracking', 'analytics', 'beacon', 'logo', 'icon', '1x1']):
+                            continue
+                        
+                        images.append(src)
+            
+            # Limiter à 10 images et dédoublonner
+            unique_images = list(dict.fromkeys(images))[:10]
+            print(f"   ✅ {len(unique_images)} image(s) extraite(s)")
+            return unique_images
+            
+        except Exception as e:
+            print(f"   ⚠️ Erreur extraction images BeautifulSoup: {str(e)}")
+            return []
+    
+    def _scrape_with_tavily(self, url):
+        """
+        Utilise Tavily pour extraire le contenu d'une URL spécifique.
+        Utile pour les sites avec JavaScript ou protection anti-scraping.
+        """
+        if not TAVILY_AVAILABLE:
+            return None
+        
+        try:
+            tavily_api_key = getattr(settings, 'TAVILY_API_KEY', None)
+            if not tavily_api_key:
+                print(f"   ⚠️ TAVILY_API_KEY non configurée")
+                return None
+            
+            print(f"🔍 Tentative de scraping via Tavily pour: {url}")
+            tavily = TavilyClient(api_key=tavily_api_key)
+            
+            # Nettoyer l'URL si nécessaire (enlever certains paramètres qui peuvent poser problème)
+            clean_url = url
+            # Garder l'URL telle quelle pour Tavily car il peut gérer les query strings
+            
+            print(f"   📡 Appel API Tavily extract...")
+            # Utiliser la méthode extract de Tavily qui gère mieux les sites JS
+            response = tavily.extract(
+                urls=[clean_url],
+                extract_depth="advanced",
+                format="text",
+                include_raw_content=True,
+                    timeout=30  # Timeout réduit pour éviter les blocages
+            )
+            
+            print(f"   📥 Réponse Tavily reçue")
+            
+            if response and response.get('results') and len(response['results']) > 0:
+                result = response['results'][0]
+                content = result.get('raw_content') or result.get('content', '')
+                
+                # Afficher un preview du contenu
+                if content:
+                    preview = content[:200].replace('\n', ' ')
+                    print(f"   📄 Preview du contenu: {preview}...")
+                
+                if content and len(content.strip()) > 50:
+                    print(f"✅ Scraping Tavily réussi: {len(content)} caractères")
+                    # Augmenter la limite à 3000 caractères pour avoir plus d'infos
+                    return content[:3000] if len(content) > 3000 else content
+                else:
+                    print(f"⚠️ Contenu Tavily trop court ou vide: {len(content) if content else 0} caractères")
+            
+            print(f"⚠️ Aucun résultat dans la réponse Tavily")
+            return None
+        except Exception as e:
+            print(f"❌ Erreur scraping Tavily pour {url}: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:500]}")
+            return None
+    
+    def _extract_flight_info_from_text(self, text_input, travel_date=None, return_date=None):
+        """
+        Extrait les informations de vol depuis le texte (dates, destinations, etc.)
+        pour déclencher une recherche en temps réel si nécessaire.
+        Retourne un tuple (query, metadata) pour tracer ce qui a été recherché.
+        """
+        flight_keywords = ['vol', 'avion', 'aérien', 'départ', 'arrivée', 'compagnie']
+        date_keywords = ['date', 'jour', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre']
+        
+        has_flight = any(keyword in text_input.lower() for keyword in flight_keywords)
+        has_date = any(keyword in text_input.lower() for keyword in date_keywords) or travel_date
+        
+        metadata = {
+            'has_flight': has_flight,
+            'has_date': has_date,
+            'travel_date': travel_date,
+            'return_date': return_date,
+            'destinations': []
+        }
+        
+        if has_flight and has_date:
+            # Construire une query de recherche pour les vols
+            # Extraire destination si possible
+            destinations = []
+            common_destinations = ['paris', 'bali', 'thailande', 'grèce', 'italie', 'espagne', 'maroc', 'tunisie', 'dubaï', 'japon', 'tokyo', 'new york', 'londres', 'rome', 'athènes', 'istanbul']
+            for dest in common_destinations:
+                if dest in text_input.lower():
+                    destinations.append(dest)
+            
+            metadata['destinations'] = destinations
+            
+            # Construire la query avec la date si disponible
+            query_parts = []
+            if destinations:
+                query_parts.append(f"vols {destinations[0]}")
+            else:
+                query_parts.append("vols")
+            
+            # Ajouter la date aller dans la recherche
+            if travel_date:
+                # Convertir la date au format lisible
+                try:
+                    from datetime import datetime
+                    # Gérer différents formats de date
+                    date_str_input = str(travel_date).strip()
+                    print(f"   Formatage date aller: '{date_str_input}'")
+                    
+                    # Essayer différents formats
+                    date_formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%dT%H:%M:%S']
+                    date_obj = None
+                    for fmt in date_formats:
+                        try:
+                            date_obj = datetime.strptime(date_str_input.split('T')[0], fmt)
+                            break
+                        except:
+                            continue
+                    
+                    if date_obj:
+                        # Utiliser les mois en français
+                        months_fr = {
+                            1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                            5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                            9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                        }
+                        date_str = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                        query_parts.append(f"date {date_str}")
+                        metadata['travel_date_formatted'] = date_str
+                        print(f"   ✅ Date formatée: {date_str}")
+                    else:
+                        query_parts.append(f"date {travel_date}")
+                        metadata['travel_date_formatted'] = travel_date
+                        print(f"   ⚠️ Format non reconnu, utilisation brute: {travel_date}")
+                except Exception as e:
+                    print(f"   ❌ Erreur formatage date: {e}")
+                    query_parts.append(f"date {travel_date}")
+                    metadata['travel_date_formatted'] = travel_date
+            
+            # Ajouter la date retour si disponible
+            if return_date:
+                try:
+                    from datetime import datetime
+                    # Gérer différents formats de date
+                    date_str_input = str(return_date).strip()
+                    print(f"   Formatage date retour: '{date_str_input}'")
+                    
+                    # Essayer différents formats
+                    date_formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%dT%H:%M:%S']
+                    date_obj = None
+                    for fmt in date_formats:
+                        try:
+                            date_obj = datetime.strptime(date_str_input.split('T')[0], fmt)
+                            break
+                        except:
+                            continue
+                    
+                    if date_obj:
+                        # Utiliser les mois en français
+                        months_fr = {
+                            1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                            5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                            9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                        }
+                        date_str = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                        query_parts.append(f"retour {date_str}")
+                        metadata['return_date_formatted'] = date_str
+                        print(f"   ✅ Date retour formatée: {date_str}")
+                    else:
+                        query_parts.append(f"retour {return_date}")
+                        metadata['return_date_formatted'] = return_date
+                except Exception as e:
+                    print(f"   ❌ Erreur formatage date retour: {e}")
+                    query_parts.append(f"retour {return_date}")
+                    metadata['return_date_formatted'] = return_date
+                query_parts.append("aller-retour")
+            
+            query_parts.append("horaires prix disponibilité")
+            query = " ".join(query_parts)
+            
+            return query, metadata
+        
+        return None, metadata
+    
+    def _get_prompt_circuit(self, text_input, website_descriptions=None, example_templates=None, travel_date=None, return_date=None, real_time_search=None, real_flights_context=None, offer_type="circuit"):
+        """Prompt pour un Circuit (plusieurs jours avec itinéraire)"""
+        
+        # Ajouter les descriptions des sites web si disponibles
+        website_context = ""
+        has_search_results = False
+        
+        if website_descriptions and len(website_descriptions) > 0:
+            website_context = "\n\n📋📋📋 INFORMATIONS RÉCUPÉRÉES DEPUIS DES SITES WEB (CONTENU RÉEL - UTILISER EN PRIORITÉ ABSOLUE) :\n"
+            for idx, desc in enumerate(website_descriptions, 1):
+                website_context += f"\n--- Site {idx}: {desc.get('url', 'URL inconnue')} ---\n"
+                content = desc.get('content', '')
+                
+                # Détecter si c'est une page de résultats de recherche
+                if "RÉSULTATS DE RECHERCHE D'HÔTELS" in content or "PLUSIEURS OPTIONS DISPONIBLES" in content:
+                    has_search_results = True
+                    website_context += content[:5000] + "\n"  # Plus de caractères pour les pages de recherche
+                else:
+                    website_context += content[:3000] + "\n"
+                
+                # Ajouter les images si disponibles
+                images = desc.get('images', [])
+                if images:
+                    image_limit = 10 if has_search_results else 5
+                    website_context += f"\n🖼️ IMAGES DISPONIBLES DEPUIS CE SITE ({len(images)} image(s)):\n"
+                    for img_idx, img_url in enumerate(images[:image_limit], 1):
+                        website_context += f"- Image {img_idx}: {img_url}\n"
+                    website_context += "\n⚠️ IMPORTANT : Ces images proviennent du site web. Tu peux les mentionner dans l'offre ou les utiliser pour enrichir les descriptions.\n"
+            
+            website_context += "\n🚨🚨🚨 CRITIQUE - UTILISATION DES SITES WEB :\n"
+            website_context += "- Ces informations proviennent DIRECTEMENT du site web scrapé\n"
+            
+            if has_search_results:
+                website_context += "\n🏨🏨🏨 PAGE DE RECHERCHE DÉTECTÉE (PLUSIEURS HÔTELS) :\n"
+                website_context += "- Le site contient PLUSIEURS HÔTELS avec leurs caractéristiques (nom, prix, étoiles, localisation, équipements, notes)\n"
+                website_context += "- ANALYSE toutes les options et CHOISIS le(s) meilleur(s) hôtel(s) pour ce circuit\n"
+                website_context += "- Critères de sélection : rapport qualité/prix, emplacement, services, note des voyageurs\n"
+                website_context += "- Utilise les NOMS EXACTS, PRIX RÉELS, ÉTOILES et DESCRIPTIONS des hôtels mentionnés\n"
+                website_context += "- Pour un circuit multi-étapes, tu peux choisir PLUSIEURS hôtels différents si pertinent\n"
+                website_context += "- NE CRÉE PAS d'hôtels fictifs - utilise UNIQUEMENT ceux listés dans les résultats\n"
+            else:
+                website_context += "- Utilise TOUTES les descriptions, détails, activités mentionnées sur le site\n"
+            
+            website_context += "- Si le site mentionne des temples, plages, activités spécifiques, utilise-les EXACTEMENT\n"
+            website_context += "- Si le site mentionne des hôtels, zones, lieux spécifiques, utilise-les\n"
+            website_context += "- Si le site mentionne des transferts, transport aéroport-hôtel, ou services de transport, utilise-les EXACTEMENT\n"
+            website_context += "- Ne crée PAS de nouvelles descriptions - utilise celles du site scrapé\n"
+            website_context += "- Les descriptions du site doivent apparaître dans ton offre, pas des descriptions inventées\n"
+            website_context += "- Pour l'introduction, utilise les descriptions du site web, pas tes propres descriptions\n"
+            website_context += "- Les images fournies peuvent être utilisées pour enrichir l'offre (mentionner leur contenu dans les descriptions)\n"
+        elif website_descriptions is not None and len(website_descriptions) == 0:
+            # Des URLs ont été fournies mais le scraping a échoué
+            website_context = "\n\n⚠️ ATTENTION : Des URLs de sites web ont été fournies mais n'ont pas pu être scrappées (sites inaccessibles ou protection anti-scraping). Utilise les informations de recherche Tavily ou tes connaissances générales.\n"
+        
+        # Ajouter les dates explicites dans le prompt
+        dates_context = ""
+        if travel_date or return_date:
+            dates_context = "\n\n📅📅📅 DATES DU VOYAGE (À UTILISER EXACTEMENT - NE PAS INVENTER) :\n"
+            if travel_date:
+                try:
+                    from datetime import datetime
+                    months_fr = {
+                        1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                        5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                        9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                    }
+                    date_obj = datetime.strptime(str(travel_date).strip().split('T')[0], '%Y-%m-%d')
+                    date_formatted = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                    dates_context += f"- Date de départ : {date_formatted} ({travel_date})\n"
+                except:
+                    dates_context += f"- Date de départ : {travel_date}\n"
+            if return_date:
+                try:
+                    from datetime import datetime
+                    months_fr = {
+                        1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                        5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                        9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                    }
+                    date_obj = datetime.strptime(str(return_date).strip().split('T')[0], '%Y-%m-%d')
+                    date_formatted = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                    dates_context += f"- Date de retour : {date_formatted} ({return_date})\n"
+                except:
+                    dates_context += f"- Date de retour : {return_date}\n"
+            dates_context += "\n🚨🚨🚨 IMPORTANT : Utilise CES DATES EXACTEMENT pour les vols. Ne crée PAS de dates différentes. Les horaires de vol doivent correspondre à ces dates. Si tu mentionnes des dates dans l'offre, utilise celles-ci, pas d'autres dates.\n"
+        
+        # Ajouter les exemples de templates si disponibles
+        templates_context = ""
+        if example_templates:
+            templates_context = "\n\n📝 EXEMPLES DE TEMPLATES À COPIER EXACTEMENT (STRUCTURE ET STYLE) :\n"
+            for idx, template in enumerate(example_templates, 1):
+                templates_context += f"\n--- Exemple Template {idx} ---\n"
+                # Si c'est du JSON, on l'affiche tel quel, sinon on prend le texte
+                if isinstance(template, dict):
+                    templates_context += json.dumps(template, ensure_ascii=False, indent=2)[:2000] + "\n"
+                else:
+                    templates_context += str(template)[:2000] + "\n"
+            templates_context += "\n⚠️⚠️⚠️ CRITIQUE : Copie EXACTEMENT la structure, le style, le format, et l'organisation de ces exemples. Utilise le même niveau de détail, les mêmes types de sections, et le même ton.\n"
+        
+        # Ajouter UNIQUEMENT les VRAIS vols d'Air France-KLM
+        flights_context = ""
+        if real_flights_context:
+            flights_context = real_flights_context
+        
+        return f"""Crée une offre de CIRCUIT de plusieurs jours DÉTAILLÉE et PROFESSIONNELLE pour : {text_input}
+{website_context}
+{dates_context}
+{templates_context}
+{flights_context}
+
+🚨🚨🚨 RÈGLES ABSOLUES :
+1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Copie les descriptions du site, ne crée pas tes propres descriptions.
+2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans la section "DATES DU VOYAGE" ci-dessus. N'invente PAS d'autres dates.
+3. Pour les vols : 
+   - Si des VOLS RÉELS ont été fournis ci-dessus (section "VOLS RÉELS TROUVÉS"), utilise-les EXACTEMENT (numéro de vol, compagnie, horaires, aéroports)
+   - Les dates de départ et retour doivent être celles fournies dans "DATES DU VOYAGE", pas d'autres dates
+   - Si AUCUN vol réel n'a été fourni, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs
+4. Pour les transferts : 
+   - Si des informations de transferts ont été trouvées dans les sites web scrapés, utilise-les EXACTEMENT et crée une section "Transferts"
+   - Si AUCUNE information de transfert n'a été trouvée dans les sites scrapés, NE CRÉE PAS de section "Transferts" du tout - omets complètement cette section du JSON
 
 IMPORTANT : Sois TRÈS DÉTAILLÉ dans chaque section. Inclus des informations spécifiques, des prix, des horaires, des descriptions complètes.
 
 Format JSON strict :
 {{
-  "title": "Titre accrocheur et mémorable",
-  "introduction": "Description complète et engageante du voyage (3-4 phrases minimum)",
+  "title": "Titre accrocheur et mémorable pour le circuit",
+  "introduction": "Description complète et engageante du circuit (3-4 phrases minimum). IMPORTANT : Si des informations de sites web ont été fournies, utilise-les EXACTEMENT pour cette introduction, pas tes propres descriptions.",
   "sections": [
     {{
       "id": "flights", 
       "type": "Flights", 
-      "title": "✈️ Transport Aérien", 
-      "body": "Détails COMPLETS des vols : compagnie, numéros de vol, horaires précis, classe de service, durée du vol, aéroports, bagages inclus, repas à bord, etc."
+      "title": "Transport Aérien", 
+      "body": "Détails COMPLETS des vols : compagnie, numéros de vol, horaires précis, classe de service, durée du vol, aéroports, bagages inclus, repas à bord, etc. 🚨🚨🚨 SI DES VOLS RÉELS ONT ÉTÉ FOURNIS CI-DESSUS (section VOLS RÉELS TROUVÉS), UTILISE LES EXACTEMENT (numéro de vol, compagnie, horaires, aéroports). Sinon, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs."
     }},
     {{
       "id": "transfers", 
       "type": "Transfers", 
-      "title": "🚗 Transferts & Transport", 
-      "body": "Détails des transferts : type de véhicule, durée, horaires, chauffeur, accueil à l'aéroport, transport local, etc."
+      "title": "Transferts & Transport", 
+      "body": "Détails des transferts : type de véhicule, durée, horaires, chauffeur, accueil à l'aéroport, transport local entre les étapes du circuit, etc. 🚨🚨🚨 SI DES INFORMATIONS DE TRANSFERTS ONT ÉTÉ FOURNIES CI-DESSUS (section SITES WEB SCRAPÉS), UTILISE LES EXACTEMENT et crée cette section. SI AUCUNE INFO DE TRANSFERT N'A ÉTÉ TROUVÉE DANS LES SITES SCRAPÉS, NE CRÉE PAS CETTE SECTION DU TOUT - omets-la du JSON."
+    }},
+    {{
+      "id": "itinerary", 
+      "type": "Itinéraire", 
+      "title": "Programme du Circuit", 
+      "body": "Itinéraire JOUR PAR JOUR détaillé : Pour chaque jour, indique les visites, activités, excursions, repas inclus, hébergements, horaires précis. Structure : Jour 1 : [détails], Jour 2 : [détails], etc. (minimum 150-200 mots par jour)"
     }},
     {{
       "id": "hotel", 
       "type": "Hotel", 
-      "title": "🏨 Hébergement", 
-      "body": "Description DÉTAILLÉE de l'hôtel : nom, catégorie, localisation, type de chambre, pension, équipements, services, vue, etc."
+      "title": "Hébergement", 
+      "body": "Description DÉTAILLÉE des hébergements : nom, catégorie, localisation pour chaque étape du circuit, type de chambre, pension, équipements, services, vue, etc."
     }},
     {{
       "id": "activities", 
       "type": "Activities", 
-      "title": "🎯 Activités & Excursions", 
-      "body": "Programme détaillé : visites guidées, excursions incluses, activités optionnelles, guides, durée, horaires, etc."
+      "title": "Activités & Excursions", 
+      "body": "Programme détaillé : visites guidées, excursions incluses dans le circuit, activités optionnelles, guides, durée, horaires, etc."
     }},
     {{
       "id": "price", 
       "type": "Price", 
-      "title": "💰 Tarifs & Conditions", 
+      "title": "Tarifs & Conditions", 
       "body": "Prix détaillé par personne, suppléments, conditions de réservation, acompte, annulation, assurance, etc."
     }}
   ],
   "cta": {{
-    "title": "🎯 Réservez votre séjour de rêve !", 
+    "title": "Réservez votre circuit de rêve !", 
     "description": "Offre limitée - Ne manquez pas cette opportunité unique", 
     "buttonText": "Réserver maintenant"
   }}
 }}
 
-EXIGENCES :
+EXIGENCES SPÉCIFIQUES CIRCUIT :
+- L'itinéraire doit être détaillé JOUR PAR JOUR avec toutes les activités, visites, et repas
+- Inclus tous les transports entre les différentes étapes du circuit
+- Décris chaque hébergement pour chaque étape
 - Chaque section doit contenir au moins 150-200 mots de contenu détaillé
-- Inclus des informations pratiques et spécifiques
-- Utilise des listes à puces pour organiser l'information
 - Sois professionnel mais engageant
-- Inclus des détails sur les services, équipements, et conditions"""
+- Inclus des détails sur les services, équipements, et conditions
+
+⚠️⚠️⚠️ FORMAT JSON CRITIQUE ⚠️⚠️⚠️
+- Réponds UNIQUEMENT avec un JSON valide, sans texte avant ou après
+- Utilise TOUJOURS des guillemets doubles " pour les chaînes, jamais d'apostrophes '
+- Échappe les guillemets dans le texte avec \\"
+- Vérifie que toutes les accolades {{ et }} sont bien fermées
+- Vérifie qu'il n'y a pas de virgule après le dernier élément d'un tableau ou objet"""
+
+    def _get_prompt_sejour(self, text_input, website_descriptions=None, example_templates=None, travel_date=None, return_date=None, real_time_search=None, real_flights_context=None, offer_type="sejour"):
+        """Prompt pour un Séjour (transport et/ou hôtel)"""
+        
+        # Ajouter les descriptions des sites web si disponibles
+        website_context = ""
+        if website_descriptions and len(website_descriptions) > 0:
+            website_context = "\n\n📋📋📋 INFORMATIONS RÉCUPÉRÉES DEPUIS DES SITES WEB (CONTENU RÉEL - UTILISER EN PRIORITÉ ABSOLUE) :\n"
+            for idx, desc in enumerate(website_descriptions, 1):
+                website_context += f"\n--- Site {idx}: {desc.get('url', 'URL inconnue')} ---\n"
+                content = desc.get('content', '')
+                website_context += content[:3000] + "\n"  # Augmenter à 3000 caractères pour avoir plus d'infos
+                
+                # Ajouter les images si disponibles
+                images = desc.get('images', [])
+                if images:
+                    website_context += f"\n🖼️ IMAGES DISPONIBLES DEPUIS CE SITE ({len(images)} image(s)):\n"
+                    for img_idx, img_url in enumerate(images[:5], 1):  # Limiter à 5 images
+                        website_context += f"- Image {img_idx}: {img_url}\n"
+                    website_context += "\n⚠️ IMPORTANT : Ces images proviennent du site web. Tu peux les mentionner dans l'offre ou les utiliser pour enrichir les descriptions.\n"
+            
+            website_context += "\n🚨🚨🚨 CRITIQUE - UTILISATION DES SITES WEB :\n"
+            website_context += "- Ces informations proviennent DIRECTEMENT du site web scrapé\n"
+            website_context += "- Utilise TOUTES les descriptions, détails, activités mentionnées sur le site\n"
+            website_context += "- Si le site mentionne des temples, plages, activités spécifiques, utilise-les EXACTEMENT\n"
+            website_context += "- Si le site mentionne des hôtels, zones, lieux spécifiques, utilise-les\n"
+            website_context += "- Si le site mentionne des transferts, transport aéroport-hôtel, ou services de transport, utilise-les EXACTEMENT\n"
+            website_context += "- Ne crée PAS de nouvelles descriptions - utilise celles du site scrapé\n"
+            website_context += "- Les descriptions du site doivent apparaître dans ton offre, pas des descriptions inventées\n"
+            website_context += "- Pour l'introduction, utilise les descriptions du site web, pas tes propres descriptions\n"
+            website_context += "- Les images fournies peuvent être utilisées pour enrichir l'offre (mentionner leur contenu dans les descriptions)\n"
+        elif website_descriptions is not None and len(website_descriptions) == 0:
+            # Des URLs ont été fournies mais le scraping a échoué
+            website_context = "\n\n⚠️ ATTENTION : Des URLs de sites web ont été fournies mais n'ont pas pu être scrappées (sites inaccessibles ou protection anti-scraping). Utilise les informations de recherche Tavily ou tes connaissances générales.\n"
+        
+        # Ajouter les dates explicites dans le prompt
+        dates_context = ""
+        if travel_date or return_date:
+            dates_context = "\n\n📅📅📅 DATES DU VOYAGE (À UTILISER EXACTEMENT - NE PAS INVENTER) :\n"
+            if travel_date:
+                try:
+                    from datetime import datetime
+                    months_fr = {
+                        1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                        5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                        9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                    }
+                    date_obj = datetime.strptime(str(travel_date).strip().split('T')[0], '%Y-%m-%d')
+                    date_formatted = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                    dates_context += f"- Date de départ : {date_formatted} ({travel_date})\n"
+                except:
+                    dates_context += f"- Date de départ : {travel_date}\n"
+            if return_date:
+                try:
+                    from datetime import datetime
+                    months_fr = {
+                        1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                        5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                        9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                    }
+                    date_obj = datetime.strptime(str(return_date).strip().split('T')[0], '%Y-%m-%d')
+                    date_formatted = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                    dates_context += f"- Date de retour : {date_formatted} ({return_date})\n"
+                except:
+                    dates_context += f"- Date de retour : {return_date}\n"
+            dates_context += "\n🚨🚨🚨 IMPORTANT : Utilise CES DATES EXACTEMENT pour les vols. Ne crée PAS de dates différentes. Les horaires de vol doivent correspondre à ces dates. Si tu mentionnes des dates dans l'offre, utilise celles-ci, pas d'autres dates.\n"
+        
+        # Ajouter les exemples de templates si disponibles
+        templates_context = ""
+        if example_templates:
+            templates_context = "\n\n📝 EXEMPLES DE TEMPLATES À COPIER EXACTEMENT (STRUCTURE ET STYLE) :\n"
+            for idx, template in enumerate(example_templates, 1):
+                templates_context += f"\n--- Exemple Template {idx} ---\n"
+                if isinstance(template, dict):
+                    templates_context += json.dumps(template, ensure_ascii=False, indent=2)[:2000] + "\n"
+                else:
+                    templates_context += str(template)[:2000] + "\n"
+            templates_context += "\n⚠️⚠️⚠️ CRITIQUE : Copie EXACTEMENT la structure, le style, le format, et l'organisation de ces exemples. Utilise le même niveau de détail, les mêmes types de sections, et le même ton.\n"
+        
+        # Ajouter UNIQUEMENT les VRAIS vols d'Air France-KLM
+        flights_context = ""
+        if real_flights_context:
+            flights_context = real_flights_context
+        
+        return f"""Crée une offre de SÉJOUR (transport et/ou hôtel) DÉTAILLÉE et PROFESSIONNELLE pour : {text_input}
+{website_context}
+{dates_context}
+{templates_context}
+{flights_context}
+
+🚨🚨🚨 RÈGLES ABSOLUES :
+1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Copie les descriptions du site, ne crée pas tes propres descriptions.
+2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans la section "DATES DU VOYAGE" ci-dessus. N'invente PAS d'autres dates.
+3. Pour les vols : 
+   - Si des VOLS RÉELS ont été fournis ci-dessus (section "VOLS RÉELS TROUVÉS"), utilise-les EXACTEMENT (numéro de vol, compagnie, horaires, aéroports)
+   - Les dates de départ et retour doivent être celles fournies dans "DATES DU VOYAGE", pas d'autres dates
+   - Si AUCUN vol réel n'a été fourni, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs
+4. Pour les transferts : 
+   - Si des informations de transferts ont été trouvées dans les sites web scrapés, utilise-les EXACTEMENT et crée une section "Transferts"
+   - Si AUCUNE information de transfert n'a été trouvée dans les sites scrapés, NE CRÉE PAS de section "Transferts" du tout - omets complètement cette section du JSON
+
+IMPORTANT : Sois TRÈS DÉTAILLÉ dans chaque section. Inclus des informations spécifiques, des prix, des horaires, des descriptions complètes.
+
+Format JSON strict :
+{{
+  "title": "Titre accrocheur et mémorable pour le séjour",
+  "introduction": "Description complète et engageante du séjour (3-4 phrases minimum). IMPORTANT : Si des informations de sites web ont été fournies, utilise-les EXACTEMENT pour cette introduction, pas tes propres descriptions.",
+  "sections": [
+    {{
+      "id": "flights",
+      "type": "Flights", 
+      "title": "Transport Aérien", 
+      "body": "Détails COMPLETS des vols : compagnie, numéros de vol, horaires précis, classe de service, durée du vol, aéroports, bagages inclus, repas à bord, etc. 🚨🚨🚨 SI DES VOLS RÉELS ONT ÉTÉ FOURNIS CI-DESSUS (section VOLS RÉELS TROUVÉS), UTILISE LES EXACTEMENT (numéro de vol, compagnie, horaires, aéroports). Sinon, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs."
+    }},
+    {{
+      "id": "transfers", 
+      "type": "Transfers", 
+      "title": "Transferts", 
+      "body": "Détails des transferts aéroport-hôtel : type de véhicule, durée, horaires, chauffeur, accueil à l'aéroport, etc. 🚨🚨🚨 SI DES INFORMATIONS DE TRANSFERTS ONT ÉTÉ FOURNIES CI-DESSUS (section SITES WEB SCRAPÉS), UTILISE LES EXACTEMENT et crée cette section. SI AUCUNE INFO DE TRANSFERT N'A ÉTÉ TROUVÉE DANS LES SITES SCRAPÉS, NE CRÉE PAS CETTE SECTION DU TOUT - omets-la du JSON."
+    }},
+    {{
+      "id": "hotel", 
+      "type": "Hotel", 
+      "title": "Hébergement", 
+      "body": "Description DÉTAILLÉE de l'hôtel : nom, catégorie, localisation, type de chambre, pension (petit-déjeuner, demi-pension, pension complète), équipements, services, vue, piscine, spa, etc."
+    }},
+    {{
+      "id": "services", 
+      "type": "Services", 
+      "title": "Services Inclus", 
+      "body": "Détails des services inclus dans le séjour : repas, accès aux équipements, activités sur place, etc."
+    }},
+    {{
+      "id": "price", 
+      "type": "Price", 
+      "title": "Tarifs & Conditions", 
+      "body": "Prix détaillé par personne, par nuit, suppléments, conditions de réservation, acompte, annulation, assurance, etc."
+    }}
+  ],
+  "cta": {{
+    "title": "Réservez votre séjour de rêve !", 
+    "description": "Offre limitée - Ne manquez pas cette opportunité unique", 
+    "buttonText": "Réserver maintenant"
+  }}
+}}
+
+EXIGENCES SPÉCIFIQUES SÉJOUR :
+- Focus sur l'hébergement et le transport (vols + transferts)
+- Décris en détail l'hôtel : chambres, services, équipements, restauration
+- Chaque section doit contenir au moins 150-200 mots de contenu détaillé
+- Sois professionnel mais engageant
+- Inclus des détails sur les services, équipements, et conditions
+
+⚠️⚠️⚠️ FORMAT JSON CRITIQUE ⚠️⚠️⚠️
+- Réponds UNIQUEMENT avec un JSON valide, sans texte avant ou après
+- Utilise TOUJOURS des guillemets doubles " pour les chaînes, jamais d'apostrophes '
+- Échappe les guillemets dans le texte avec \\"
+- Vérifie que toutes les accolades {{ et }} sont bien fermées
+- Vérifie qu'il n'y a pas de virgule après le dernier élément d'un tableau ou objet"""
+
+    def _get_prompt_transport(self, text_input, website_descriptions=None, example_templates=None, real_time_search=None, travel_date=None, return_date=None, real_flights_context=None, offer_type="transport"):
+        """Prompt pour Transport seul"""
+        
+        # Ajouter les descriptions des sites web si disponibles
+        website_context = ""
+        if website_descriptions and len(website_descriptions) > 0:
+            website_context = "\n\n📋📋📋 INFORMATIONS RÉCUPÉRÉES DEPUIS DES SITES WEB (CONTENU RÉEL - UTILISER EN PRIORITÉ ABSOLUE) :\n"
+            for idx, desc in enumerate(website_descriptions, 1):
+                website_context += f"\n--- Site {idx}: {desc.get('url', 'URL inconnue')} ---\n"
+                content = desc.get('content', '')
+                website_context += content[:3000] + "\n"  # Augmenter à 3000 caractères pour avoir plus d'infos
+                
+                # Ajouter les images si disponibles
+                images = desc.get('images', [])
+                if images:
+                    website_context += f"\n🖼️ IMAGES DISPONIBLES DEPUIS CE SITE ({len(images)} image(s)):\n"
+                    for img_idx, img_url in enumerate(images[:5], 1):  # Limiter à 5 images
+                        website_context += f"- Image {img_idx}: {img_url}\n"
+                    website_context += "\n⚠️ IMPORTANT : Ces images proviennent du site web. Tu peux les mentionner dans l'offre ou les utiliser pour enrichir les descriptions.\n"
+            
+            website_context += "\n🚨🚨🚨 CRITIQUE - UTILISATION DES SITES WEB :\n"
+            website_context += "- Ces informations proviennent DIRECTEMENT du site web scrapé\n"
+            website_context += "- Utilise TOUTES les descriptions, détails, activités mentionnées sur le site\n"
+            website_context += "- Si le site mentionne des temples, plages, activités spécifiques, utilise-les EXACTEMENT\n"
+            website_context += "- Si le site mentionne des hôtels, zones, lieux spécifiques, utilise-les\n"
+            website_context += "- Si le site mentionne des transferts, transport aéroport-hôtel, ou services de transport, utilise-les EXACTEMENT\n"
+            website_context += "- Ne crée PAS de nouvelles descriptions - utilise celles du site scrapé\n"
+            website_context += "- Les descriptions du site doivent apparaître dans ton offre, pas des descriptions inventées\n"
+            website_context += "- Pour l'introduction, utilise les descriptions du site web, pas tes propres descriptions\n"
+            website_context += "- Les images fournies peuvent être utilisées pour enrichir l'offre (mentionner leur contenu dans les descriptions)\n"
+        elif website_descriptions is not None and len(website_descriptions) == 0:
+            # Des URLs ont été fournies mais le scraping a échoué
+            website_context = "\n\n⚠️ ATTENTION : Des URLs de sites web ont été fournies mais n'ont pas pu être scrappées (sites inaccessibles ou protection anti-scraping). Utilise les informations de recherche Tavily ou tes connaissances générales.\n"
+        
+        # Ajouter les dates explicites dans le prompt
+        dates_context = ""
+        if travel_date or return_date:
+            dates_context = "\n\n📅📅📅 DATES DU VOYAGE (À UTILISER EXACTEMENT - NE PAS INVENTER) :\n"
+            if travel_date:
+                try:
+                    from datetime import datetime
+                    months_fr = {
+                        1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                        5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                        9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                    }
+                    date_obj = datetime.strptime(str(travel_date).strip().split('T')[0], '%Y-%m-%d')
+                    date_formatted = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                    dates_context += f"- Date de départ : {date_formatted} ({travel_date})\n"
+                except:
+                    dates_context += f"- Date de départ : {travel_date}\n"
+            if return_date:
+                try:
+                    from datetime import datetime
+                    months_fr = {
+                        1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
+                        5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
+                        9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre'
+                    }
+                    date_obj = datetime.strptime(str(return_date).strip().split('T')[0], '%Y-%m-%d')
+                    date_formatted = f"{date_obj.day} {months_fr[date_obj.month]} {date_obj.year}"
+                    dates_context += f"- Date de retour : {date_formatted} ({return_date})\n"
+                except:
+                    dates_context += f"- Date de retour : {return_date}\n"
+            dates_context += "\n🚨🚨🚨 IMPORTANT : Utilise CES DATES EXACTEMENT pour les vols. Ne crée PAS de dates différentes. Les horaires de vol doivent correspondre à ces dates. Si tu mentionnes des dates dans l'offre, utilise celles-ci, pas d'autres dates.\n"
+        
+        # Ajouter UNIQUEMENT les VRAIS vols d'Air France-KLM (plus de Tavily)
+        if real_flights_context:
+            real_time_context = real_flights_context
+        else:
+            # Pas de vols trouvés - contexte vide (pas de Tavily)
+            real_time_context = ""
+        
+        # Ajouter les exemples de templates si disponibles
+        templates_context = ""
+        if example_templates:
+            templates_context = "\n\n📝 EXEMPLES DE TEMPLATES À COPIER EXACTEMENT (STRUCTURE ET STYLE) :\n"
+            for idx, template in enumerate(example_templates, 1):
+                templates_context += f"\n--- Exemple Template {idx} ---\n"
+                if isinstance(template, dict):
+                    templates_context += json.dumps(template, ensure_ascii=False, indent=2)[:2000] + "\n"
+                else:
+                    templates_context += str(template)[:2000] + "\n"
+            templates_context += "\n⚠️⚠️⚠️ CRITIQUE : Copie EXACTEMENT la structure, le style, le format, et l'organisation de ces exemples. Utilise le même niveau de détail, les mêmes types de sections, et le même ton.\n"
+        
+        # Instructions spéciales pour les vols avec dates/heures
+        flight_instructions = ""
+        has_flight_keywords = any(keyword in text_input.lower() for keyword in ['date', 'heure', 'jour', 'départ', 'arrivée', 'vol'])
+        
+        # Vérifier si on a des informations réelles de vols depuis les sites ou Tavily
+        has_real_flight_info = False
+        if website_descriptions:
+            for desc in website_descriptions:
+                content = desc.get('content', '').lower()
+                # Vérifier qu'il y a vraiment des infos de vol (pas juste des mots-clés négatifs)
+                if any(keyword in content for keyword in ['vol', 'flight', 'compagnie', 'airline', 'départ', 'arrivée', 'aéroport']):
+                    # Exclure les messages négatifs
+                    negative = any(indicator in content for indicator in ['aucun vol', 'no flights', 'pas de vol', 'not available'])
+                    if not negative:
+                        has_real_flight_info = True
+                        break
+        
+        # Pour Tavily, vérifier que les résultats sont valides (pas juste "aucun vol trouvé")
+        if real_time_search and isinstance(real_time_search, list):
+            for result in real_time_search:
+                content = (result.get('content', '') or result.get('raw_content', '')).lower()
+                # Vérifier qu'il y a des infos positives
+                has_positive = any(keyword in content for keyword in ['vol', 'flight', 'departure', 'départ', 'arrival', 'arrivée', 'airline', 'compagnie'])
+                has_negative = any(indicator in content for indicator in ['aucun vol', 'no flights', 'no results', 'pas de vol', 'not available'])
+                
+                if has_positive and not has_negative:
+                    has_real_flight_info = True
+                    break
+        
+        if has_flight_keywords or real_time_search or has_real_flight_info:
+            flight_instructions = "\n\n✈️ INSTRUCTIONS SPÉCIALES POUR LES VOLS :\n"
+            
+            if not has_real_flight_info and offer_type == "transport":
+                flight_instructions += "🚨🚨🚨🚨🚨 CRITIQUE ABSOLUE - TRANSPORT SEUL :\n"
+                flight_instructions += "- AUCUNE information de vol réelle trouvée dans les sites web scrapés ni dans les recherches Tavily\n"
+                flight_instructions += "- INTERDICTION TOTALE : NE CRÉE ABSOLUMENT PAS de section de vol avec des informations inventées\n"
+                flight_instructions += "- NE CRÉE PAS de section de type 'Flights' si tu n'as pas d'informations RÉELLES\n"
+                flight_instructions += "- N'INVENTE JAMAIS de numéros de vol (UA 123, AF 456, etc.)\n"
+                flight_instructions += "- N'INVENTE JAMAIS d'horaires (22h00, 17h30, etc.)\n"
+                flight_instructions += "- N'INVENTE JAMAIS de compagnies aériennes\n"
+                flight_instructions += "- Si tu ne peux pas créer une offre de transport avec des informations RÉELLES, crée UNE SEULE section 'Avertissement' qui dit : '⚠️ Les informations de vol pour cette route/date ne sont pas disponibles. Veuillez vérifier directement auprès des compagnies aériennes.'\n"
+                flight_instructions += "- C'est UN PROBLÈME GRAVE si tu inventes des vols - ces informations seront données à des clients réels\n"
+            elif real_time_search:
+                flight_instructions += "⚠️⚠️⚠️ ATTENTION : Des recherches en temps réel ont été effectuées. Utilise EN PRIORITÉ les informations réelles trouvées dans les résultats de recherche ci-dessus (horaires, prix, compagnies, disponibilités).\n"
+            
+            if has_real_flight_info:
+                flight_instructions += "- Utilise UNIQUEMENT les informations de vols trouvées dans les sites web scrapés ou les recherches Tavily\n"
+                flight_instructions += "- Si des dates, heures ou jours sont mentionnés dans les données scrapées, utilise-les EXACTEMENT comme indiqué\n"
+                flight_instructions += "- Pour les vols, structure les informations de manière réaliste : numéro de vol (ex: AF 1234), compagnie, horaires précis (départ/arrivée), aéroports (codes IATA si possible), durée de vol\n"
+                flight_instructions += "- Utilise des compagnies aériennes réelles qui desservent la route mentionnée\n"
+                flight_instructions += "- Les horaires doivent être cohérents avec les fuseaux horaires et les durées de vol réelles\n"
+        
+        return f"""Crée une offre de TRANSPORT SEUL DÉTAILLÉE et PROFESSIONNELLE pour : {text_input}
+{website_context}
+{dates_context}
+{templates_context}
+{real_time_context}
+{flight_instructions}
+
+🚨🚨🚨 RÈGLES ABSOLUES :
+1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Copie les descriptions du site, ne crée pas tes propres descriptions.
+2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans la section "DATES DU VOYAGE" ci-dessus. N'invente PAS d'autres dates.
+3. Pour les vols : Les dates de départ et retour doivent être celles fournies dans "DATES DU VOYAGE", pas d'autres dates. Les horaires peuvent venir des recherches Tavily, mais les DATES doivent être celles fournies.
+4. 🚨🚨🚨🚨🚨 RÈGLE ABSOLUE - INTERDICTION TOTALE D'INVENTER DES VOLS : 
+   - SI les recherches Tavily montrent "aucun vol trouvé", "no flights available", "pas de vol disponible" → INTERDICTION TOTALE de créer une section de vol avec des infos inventées.
+   - SI les sites web scrapés n'ont PAS d'informations de vol réelles → NE CRÉE PAS de section de vol avec des données fictives.
+   - NE JAMAIS inventer de numéros de vol (UA 123, AF 456, etc.) - C'EST TRÈS GRAVE, ces infos vont à des clients réels.
+   - NE JAMAIS inventer d'horaires (22h00, 17h30, etc.) - C'EST MENTIR aux clients.
+   - NE JAMAIS inventer de compagnies aériennes ou de routes - C'EST ILLÉGAL de mentir aux clients.
+   - SI tu n'as PAS d'informations RÉELLES de vol → NE CRÉE PAS de section "Flights" du tout, OU crée UNE section "Avertissement" qui dit : "⚠️ Les informations de vol ne sont pas disponibles pour cette route/date. Contactez directement les compagnies aériennes pour vérifier les disponibilités et horaires."
+   - C'EST UN PROBLÈME CRITIQUE si tu inventes des vols - tu mets des clients en danger avec de fausses informations.
+   - Si les sources indiquent "aucun vol trouvé", tu DOIS respecter ça et NE PAS créer de section de vol inventée.
+
+IMPORTANT : Sois TRÈS DÉTAILLÉ dans chaque section. Inclus des informations spécifiques, des prix, des horaires, des descriptions complètes. MAIS n'invente RIEN qui ne soit pas dans les données fournies.
+
+Format JSON strict :
+{{
+  "title": "Titre accrocheur et mémorable pour le transport",
+  "introduction": "Description complète et engageante du service de transport (3-4 phrases minimum). IMPORTANT : Si des informations de sites web ont été fournies, utilise-les EXACTEMENT pour cette introduction, pas tes propres descriptions.",
+  "sections": [
+    {{
+      "id": "flights", 
+      "type": "Flights", 
+      "title": "Transport Aérien", 
+      "body": "Détails COMPLETS des vols : compagnie aérienne, numéros de vol, horaires précis (départ et arrivée), classe de service (Économique, Premium, Affaires, Première), durée du vol, aéroports de départ et d'arrivée, terminal, bagages inclus (cabine et soute), repas à bord, équipements, sièges, etc. 🚨🚨🚨 SI DES VOLS RÉELS ONT ÉTÉ FOURNIS CI-DESSUS (section VOLS RÉELS TROUVÉS), UTILISE LES EXACTEMENT. Sinon, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs."
+    }},
+    {{
+      "id": "baggage", 
+      "type": "Bagage", 
+      "title": "Bagages", 
+      "body": "Détails COMPLETS sur les bagages : poids et dimensions autorisés pour bagage cabine, bagage en soute, frais supplémentaires, restrictions, etc."
+    }},
+    {{
+      "id": "services", 
+      "type": "Services", 
+      "title": "Services à Bord", 
+      "body": "Description des services inclus : repas, boissons, divertissement, Wi-Fi, prises électriques, espace pour les jambes, équipements de la compagnie, etc."
+    }},
+    {{
+      "id": "price", 
+      "type": "Price", 
+      "title": "Tarifs & Conditions", 
+      "body": "Prix détaillé par personne, par classe de service, suppléments (bagages, siège, repas), conditions de réservation, acompte, annulation, modification, assurance, etc."
+    }}
+  ],
+  "cta": {{
+    "title": "Réservez votre transport !", 
+    "description": "Offre limitée - Ne manquez pas cette opportunité unique", 
+    "buttonText": "Réserver maintenant"
+  }}
+}}
+
+EXIGENCES SPÉCIFIQUES TRANSPORT :
+- Focus UNIQUEMENT sur le transport (vols aériens)
+- Détaille TOUT sur les vols : horaires, compagnies, classes, bagages, services
+- Chaque section doit contenir au moins 150-200 mots de contenu détaillé
+- Sois professionnel mais engageant
+- Inclus tous les détails pratiques pour le transport
+
+⚠️⚠️⚠️ FORMAT JSON CRITIQUE ⚠️⚠️⚠️
+- Réponds UNIQUEMENT avec un JSON valide, sans texte avant ou après
+- Utilise TOUJOURS des guillemets doubles " pour les chaînes, jamais d'apostrophes '
+- Échappe les guillemets dans le texte avec \\"
+- Vérifie que toutes les accolades {{ et }} sont bien fermées
+- Vérifie qu'il n'y a pas de virgule après le dernier élément d'un tableau ou objet"""
+
+    def post(self, request):
+        text_input = request.data.get("text")
+        offer_type = request.data.get("offer_type", "circuit")  # Par défaut circuit
+        flight_input = request.data.get("flight_input")  # ✅ Infos de vol (format GDS, numéro, texte libre)
+        company_info = request.data.get("company_info", {})
+        website_urls = request.data.get("website_urls", [])  # ✅ Liste d'URLs de sites à scraper
+        example_templates = request.data.get("example_templates", [])  # ✅ Exemples de templates
+        
+        # Les champs origin, destination, travel_date, return_date peuvent encore être fournis pour compatibilité
+        # mais ne sont plus affichés dans le frontend (extraits automatiquement depuis flight_input)
+        origin = request.data.get("origin", "Paris")
+        destination = request.data.get("destination")
+        travel_date = request.data.get("travel_date")
+        return_date = request.data.get("return_date")
+        
+        print(f"📥 Requête reçue:")
+        print(f"   - offer_type: {offer_type}")
+        print(f"   - flight_input: {flight_input[:100] if flight_input else 'Non fourni'}{'...' if flight_input and len(flight_input) > 100 else ''}")
+        print(f"   - text_input longueur: {len(text_input) if text_input else 0} caractères")
+        if travel_date or destination:
+            print(f"   - Params legacy (si fournis): date={travel_date}, dest={destination}")
+        
+        # Validation : soit text_input, soit flight_input doit être fourni
+        if not text_input and not flight_input:
+            return Response({"error": "Texte ou infos de vol requis"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Si seulement flight_input est fourni, créer un text_input minimal
+        if not text_input and flight_input:
+            text_input = f"Demande de devis pour le(s) vol(s) suivant(s) : {flight_input}"
+            print(f"   ℹ️ Texte auto-généré depuis flight_input")
+        
+        try:
+            # Récupérer les descriptions des sites web si des URLs sont fournies
+            # Limiter à 3 URLs max pour éviter les timeouts
+            website_descriptions = None
+            if website_urls and isinstance(website_urls, list) and len(website_urls) > 0:
+                limited_urls = website_urls[:3]  # Maximum 3 URLs pour éviter les timeouts
+                if len(website_urls) > 3:
+                    print(f"⚠️ Limitation à 3 URLs (sur {len(website_urls)}) pour éviter les timeouts")
+                print(f"🌐 Récupération des descriptions depuis {len(limited_urls)} site(s)...")
+                website_descriptions = self._get_website_descriptions(limited_urls)
+                print(f"✅ {len(website_descriptions)} description(s) récupérée(s)")
+            
+            # Charger les templates par défaut pour ce type d'offre
+            default_templates = self._load_default_templates(offer_type)
+            
+            # Traiter les exemples de templates (fusionner avec les templates par défaut)
+            processed_templates = []
+            
+            # D'abord ajouter les templates par défaut
+            if default_templates:
+                processed_templates.extend(default_templates)
+                print(f"📝 Template par défaut chargé pour type '{offer_type}'")
+            
+            # Ensuite ajouter les templates fournis par l'utilisateur (s'ils existent)
+            if example_templates and isinstance(example_templates, list) and len(example_templates) > 0:
+                print(f"📝 Traitement de {len(example_templates)} exemple(s) de template(s) utilisateur...")
+                for template in example_templates:
+                    # Si c'est une string, essayer de la parser en JSON, sinon garder comme texte
+                    if isinstance(template, str):
+                        try:
+                            processed_templates.append(json.loads(template))
+                        except json.JSONDecodeError:
+                            processed_templates.append(template)
+                    else:
+                        processed_templates.append(template)
+                print(f"✅ {len(processed_templates)} template(s) au total (défaut + utilisateur)")
+            elif default_templates:
+                print(f"✅ Utilisation du template par défaut uniquement")
+            
+            # Recherche de VRAIS vols avec Amadeus (via recherche intelligente)
+            real_flights_data = None
+            real_time_search_results = None  # TOUJOURS None - Tavily désactivé
+            search_metadata = {}
+            
+            # Priorité 1 : Si flight_input est fourni, utiliser la recherche intelligente
+            # Priorité 2 : Sinon, logique classique (origine/destination)
+            use_smart_search = bool(flight_input)
+            
+            print("=" * 80)
+            print("🔍 DÉBUT RECHERCHE DE VOLS - AMADEUS (SMART SEARCH)")
+            print("=" * 80)
+            print(f"   - Mode: {'SMART SEARCH (format libre)' if use_smart_search else 'CLASSIQUE (origine/destination)'}")
+            print(f"   - flight_input fourni: {bool(flight_input)}")
+            if flight_input:
+                print(f"   - flight_input value: '{flight_input[:100]}'")
+            print(f"   - offer_type: {offer_type}")
+            print(f"   - travel_date: {travel_date}")
+            print(f"   - return_date: {return_date}")
+            print()
+            
+            # MODE 1 : Recherche intelligente (prioritaire si flight_input fourni)
+            if use_smart_search:
+                print(f"✈️ Mode SMART SEARCH - Recherche intelligente avec parsing automatique")
+                print(f"   Input: '{flight_input}'")
+                
+                real_flights_data = self._search_flights_smart(flight_input, search_metadata)
+                
+                if real_flights_data:
+                    print(f"✅ {len(real_flights_data)} vol(s) trouvé(s) via recherche intelligente")
+                    print(f"   Stratégie utilisée: {search_metadata.get('search_strategy')}")
+                    if search_metadata.get('parsed_data'):
+                        parsed = search_metadata['parsed_data']
+                        print(f"   Infos parsées:")
+                        if parsed.get('origin_airport'):
+                            print(f"      - Origine: {parsed['origin_airport']}")
+                        if parsed.get('destination_airport'):
+                            print(f"      - Destination: {parsed['destination_airport']}")
+                        if parsed.get('departure_date'):
+                            print(f"      - Date départ: {parsed['departure_date']}")
+                        if parsed.get('return_date'):
+                            print(f"      - Date retour: {parsed['return_date']}")
+                else:
+                    print(f"⚠️ Aucun vol trouvé via recherche intelligente")
+                    if search_metadata.get('parsed_data'):
+                        print(f"   Mais infos parsées disponibles:")
+                        parsed = search_metadata['parsed_data']
+                        if parsed.get('origin_airport'):
+                            print(f"      - Origine: {parsed['origin_airport']}")
+                        if parsed.get('destination_airport'):
+                            print(f"      - Destination: {parsed['destination_airport']}")
+            
+            # MODE 2 : Logique classique (fallback si pas de flight_input)
+            elif travel_date or offer_type == "transport":
+                print(f"✈️ Mode CLASSIQUE - Recherche par origine/destination (fallback)")
+                print(f"   Note: Pour utiliser le format GDS/numéro de vol, remplissez flight_input")
+                
+                # Code simplifié : juste informer qu'on n'a pas de flight_input
+                print(f"   ℹ️ Aucun flight_input fourni")
+                print(f"   💡 Pour une recherche automatique, utilisez le champ flight_input avec:")
+                print(f"      - Format GDS: '18NOV-25NOV BRU JFK 10:00 14:00'")
+                print(f"      - Numéro de vol: 'AF001 18/11/2025'")
+                print(f"      - Texte libre: 'Vol AF001 de Paris à NY le 18/11'")
+                
+                search_metadata['search_attempted'] = False
+                search_metadata['failure_reason'] = ['no_flight_input_provided']
+            
+            else:
+                print(f"   ℹ️ Recherche de vols non activée (pas de flight_input, pas de date)")
+                search_metadata['search_attempted'] = False
+            
+            # Vérification finale des résultats
+            print()
+            print("🔍 Vérification résultat recherche...")
+            if not real_flights_data:
+                if search_metadata.get('search_attempted', False):
+                    print(f"❌ Aucun vol trouvé")
+                    print(f"   💡 Vérifiez les logs ci-dessus pour plus de détails")
+                    if search_metadata.get('failure_reason'):
+                        print(f"   📋 Raisons: {', '.join(search_metadata.get('failure_reason', []))}")
+                else:
+                    print(f"ℹ️ Recherche de vols non effectuée")
+                
+                search_metadata['has_valid_flight_info'] = False
+                if 'source' not in search_metadata:
+                    search_metadata['source'] = None
+            else:
+                print(f"✅ {len(real_flights_data)} vol(s) trouvé(s)")
+                print(f"   Source: {search_metadata.get('source', 'unknown')}")
+                if search_metadata.get('search_strategy'):
+                    print(f"   Stratégie: {search_metadata['search_strategy']}")
+            
+            real_time_search_results = None  # Tavily toujours désactivé
+            
+            print("=" * 80)
+            print("FIN RECHERCHE DE VOLS")
+            print("=" * 80)
+            print()
+            
+            # Formater les vols réels pour le prompt ChatGPT
+            real_flights_context = ""
+            if real_flights_data:
+                source_name = search_metadata.get('source', 'API')
+                real_flights_context = f"\n\n✈️✈️✈️ VOLS RÉELS TROUVÉS (UTILISER CES DONNÉES - NE PAS INVENTER) :\n"
+                real_flights_context += f"Source: {source_name}\n"
+                
+                for idx, flight in enumerate(real_flights_data, 1):
+                    real_flights_context += f"\n--- Vol {idx} (RÉEL - DEPUIS {source_name.upper()}) ---\n"
+                    real_flights_context += f"Numéro de vol: {flight.get('flight_number', 'N/A')}\n"
+                    
+                    # Compagnie (peut être 'airline' ou 'carrier_code')
+                    airline = flight.get('airline') or flight.get('carrier_code', 'N/A')
+                    if airline != 'N/A':
+                        real_flights_context += f"Compagnie: {airline}\n"
+                    
+                    # Infos vol
+                    real_flights_context += f"Départ: {flight.get('departure_airport', 'N/A')} à {flight.get('departure_time', 'N/A')}\n"
+                    real_flights_context += f"Arrivée: {flight.get('arrival_airport', 'N/A')} à {flight.get('arrival_time', 'N/A')}\n"
+                    
+                    # Durée si disponible
+                    if flight.get('duration'):
+                        real_flights_context += f"Durée: {flight['duration']}\n"
+                    
+                    # Type de vol (direct/escales)
+                    if 'stops' in flight:
+                        if flight['stops'] == 0:
+                            real_flights_context += f"Type: Vol direct\n"
+                        else:
+                            real_flights_context += f"Type: {flight['stops']} escale(s)\n"
+                    
+                    # Prix si disponible
+                    if flight.get('price'):
+                        real_flights_context += f"Prix: {flight['price']} {flight.get('currency', 'EUR')}\n"
+                    
+                    # Terminaux si disponibles
+                    if flight.get('terminal_departure'):
+                        real_flights_context += f"Terminal départ: {flight['terminal_departure']}\n"
+                    if flight.get('terminal_arrival'):
+                        real_flights_context += f"Terminal arrivée: {flight['terminal_arrival']}\n"
+                
+                real_flights_context += f"\n🚨🚨🚨 CRITIQUE : Ces vols sont RÉELS et vérifiables. Utilise EXACTEMENT ces informations."
+            
+            # Sélectionner le prompt selon le type d'offre
+            # IMPORTANT: real_time_search_results est TOUJOURS None (Tavily désactivé)
+            # Seuls les vols réels d'Air France-KLM sont utilisés via real_flights_context
+            print(f"📝 Préparation des prompts:")
+            print(f"   - real_time_search_results: {real_time_search_results} (Tavily désactivé)")
+            print(f"   - real_flights_context disponible: {bool(real_flights_context)}")
+            if real_flights_context:
+                print(f"   - Longueur real_flights_context: {len(real_flights_context)} caractères")
+            
+            if offer_type == "circuit":
+                prompt = self._get_prompt_circuit(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
+            elif offer_type == "sejour":
+                prompt = self._get_prompt_sejour(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
+            elif offer_type == "transport":
+                prompt = self._get_prompt_transport(text_input, website_descriptions, processed_templates, None, travel_date, return_date, real_flights_context, offer_type)  # None pour Tavily
+            else:
+                # Par défaut, utiliser circuit
+                prompt = self._get_prompt_circuit(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
             
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -560,17 +2748,294 @@ EXIGENCES :
             )
             
             offer_json = response.choices[0].message.content
+            # Nettoyer le JSON
             if "```json" in offer_json:
                 offer_json = offer_json.split("```json")[1].split("```")[0]
+            elif "```" in offer_json:
+                # Peut être ``` sans json
+                offer_json = offer_json.split("```")[1].split("```")[0]
             
-            offer_structure = json.loads(offer_json.strip())
+            # Nettoyer le JSON avant parsing
+            offer_json_clean = offer_json.strip()
             
-            # Enrichir les sections avec des images
-            self.enrich_sections_with_images(offer_structure)
+            # Supprimer les caractères invisibles et nettoyer
+            offer_json_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', offer_json_clean)  # Supprimer caractères de contrôle
+            
+            # Supprimer les URLs d'images qui apparaissent comme texte dans le contenu
+            # Pattern pour détecter les URLs d'images (http/https avec extensions d'images)
+            image_url_pattern = r'https?://[^\s"\'<>]+\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?[^\s"\'<>]*)?'
+            offer_json_clean = re.sub(image_url_pattern, '', offer_json_clean, flags=re.IGNORECASE)
+            
+            # Supprimer les références "image url" ou "image:" qui pourraient rester
+            offer_json_clean = re.sub(r'(?i)(image\s*url|image:\s*|url\s*image)[^\s]*', '', offer_json_clean)
+            
+            try:
+                offer_structure = json.loads(offer_json_clean)
+            except json.JSONDecodeError as e:
+                print(f"❌ ERREUR PARSING JSON: {e}")
+                print(f"📄 JSON REÇU (premiers 1000 chars):\n{offer_json_clean[:1000]}")
+                
+                # Essayer de corriger les erreurs JSON courantes
+                offer_json_fixed = offer_json_clean
+                # Remplacer les apostrophes simples dans les clés/valeurs par des doubles quotes
+                offer_json_fixed = re.sub(r"'(\w+)':", r'"\1":', offer_json_fixed)  # Clés avec apostrophes
+                offer_json_fixed = re.sub(r':\s*\'([^\']*)\'', r': "\1"', offer_json_fixed)  # Valeurs avec apostrophes simples
+                # Supprimer les virgules avant } ou ]
+                offer_json_fixed = re.sub(r',(\s*[}\]])', r'\1', offer_json_fixed)
+                # Corriger les guillemets non fermés
+                offer_json_fixed = re.sub(r'(\w+):\s*([^",{\[\s]+)(\s*[,\n}])', r'\1: "\2"\3', offer_json_fixed)
+                
+                try:
+                    offer_structure = json.loads(offer_json_fixed)
+                    print("✅ JSON corrigé avec succès !")
+                except json.JSONDecodeError as e2:
+                    print(f"❌ Échec correction JSON: {e2}")
+                    # Essayer une dernière fois avec json5 ou avec une approche plus permissive
+                    try:
+                        # Extraire juste le JSON entre les premières { et dernières }
+                        start_idx = offer_json_fixed.find('{')
+                        end_idx = offer_json_fixed.rfind('}')
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            offer_json_fixed = offer_json_fixed[start_idx:end_idx+1]
+                            offer_structure = json.loads(offer_json_fixed)
+                            print("✅ JSON extrait avec succès !")
+                        else:
+                            raise e2
+                    except:
+                    # Si ça échoue encore, retourner une erreur avec le JSON
+                        error_context = offer_json_clean[max(0, e.pos-200):e.pos+200] if hasattr(e, 'pos') else offer_json_clean[:500]
+                    return Response({
+                        "error": f"Erreur parsing JSON OpenAI: {str(e)}",
+                            "error_position": getattr(e, 'pos', None),
+                            "raw_json_preview": error_context,
+                            "hint": "Le JSON généré par OpenAI contient des erreurs de format. Veuillez réessayer."
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # Préparer les métadonnées de traçabilité
+            airfrance_klm_used = search_metadata.get('source') == 'airfrance_klm'
+            airfrance_klm_flights_count = search_metadata.get('real_flights_count', 0)
+            
+            print(f"📊 Préparation métadonnées:")
+            print(f"   - search_metadata keys: {list(search_metadata.keys())}")
+            print(f"   - search_metadata['source']: {search_metadata.get('source', 'NON DÉFINI')}")
+            print(f"   - airfrance_klm_used: {airfrance_klm_used}")
+            print(f"   - airfrance_klm_flights_count: {airfrance_klm_flights_count}")
+            print(f"   - real_flights_data disponible: {bool(real_flights_data)}")
+            if real_flights_data:
+                print(f"   - Nombre de vols dans real_flights_data: {len(real_flights_data)}")
+            print(f"   - travel_date fourni: {bool(travel_date)} ({travel_date if travel_date else 'NON FOURNI'})")
+            print(f"   - return_date fourni: {bool(return_date)} ({return_date if return_date else 'NON FOURNI'})")
+            
+            metadata = {
+                'search_info': {
+                    'tavily_used': False,  # TOUJOURS False - Tavily désactivé
+                    'airfrance_klm_used': airfrance_klm_used,
+                    'airfrance_klm_flights_count': airfrance_klm_flights_count,
+                    'search_query': None,  # Pas de Tavily
+                    'results_count': 0,  # Pas de Tavily
+                    'travel_date': travel_date,
+                    'return_date': return_date,
+                    'is_round_trip': bool(return_date),
+                    'destinations_detected': search_metadata.get('destinations', []),
+                    'search_attempted': search_metadata.get('search_attempted', False),
+                    'destination_code_found': search_metadata.get('destination_code_found', False),
+                    'travel_date_provided': search_metadata.get('travel_date_provided', False),
+                    'origin_code': search_metadata.get('origin_code'),
+                    'destination_code': search_metadata.get('destination_code'),
+                    'origin_provided': search_metadata.get('origin_provided'),
+                    'destination_provided': search_metadata.get('destination_provided'),
+                    'failure_reason': search_metadata.get('failure_reason', []),
+                },
+                'website_scraping': {
+                    'urls_provided': website_urls if website_urls else [],
+                    'urls_scraped': [],
+                    'successful_scrapes': 0,
+                    'failed_scrapes': 0
+                },
+                'templates_used': {
+                    'default_template_loaded': bool(default_templates),
+                    'user_templates_count': len(example_templates) if example_templates else 0,
+                    'total_templates': len(processed_templates) if processed_templates else 0
+                },
+                'tavily_results': None,  # TOUJOURS None - Tavily désactivé
+                'airfrance_klm_flights': None  # Vols réels d'Air France-KLM si disponibles
+            }
+            
+            # Ajouter les infos sur le scraping de sites
+            if website_descriptions:
+                metadata['website_scraping']['urls_scraped'] = [desc.get('url') for desc in website_descriptions if desc.get('url')]
+                metadata['website_scraping']['successful_scrapes'] = len(website_descriptions)
+            else:
+                # Si des URLs ont été fournies mais aucune description récupérée
+                if website_urls and len(website_urls) > 0:
+                    metadata['website_scraping']['failed_scrapes'] = len(website_urls)
+                    metadata['website_scraping']['error'] = "Aucun site n'a pu être scrappé. Vérifiez que les URLs sont accessibles et que le site n'utilise pas de protection anti-scraping."
+            
+            # Ajouter les vols réels d'Air France-KLM (pas Tavily)
+            if real_flights_data:
+                metadata['airfrance_klm_flights'] = real_flights_data
+                print(f"📊 Métadonnées: {len(real_flights_data)} vol(s) Air France-KLM ajouté(s) aux métadonnées")
+            
+            # Tavily est DÉSACTIVÉ - plus de tavily_results
+            print(f"📊 Métadonnées: tavily_results = None (Tavily désactivé)")
+            
+            # Enrichir les sections avec des images (y compris celles des sites web)
+            # Ajouter les images scrapées aux métadonnées
+            scraped_images = []
+            if website_descriptions:
+                for desc in website_descriptions:
+                    if desc.get('images'):
+                        scraped_images.extend(desc.get('images', []))
+            
+            # Passer les images scrapées à la fonction d'enrichissement
+            self.enrich_sections_with_images(offer_structure, scraped_images=scraped_images)
+            
+            # VALIDATION CRITIQUE POST-PARSING : Supprimer les sections de vol inventées si aucune source valide
+            # IMPORTANT: Tavily est désactivé, on utilise uniquement les vols Air France-KLM
+            has_valid_flight_info = search_metadata.get('has_valid_flight_info', False)
+            
+            # Mettre à jour has_valid_flight_info avec les vols réels d'Air France-KLM
+            if real_flights_data:
+                has_valid_flight_info = True
+                print(f"✅✅✅ Vols RÉELS d'Air France-KLM disponibles - validation passée")
+            
+            # Si pas d'infos valides, SUPPRIMER toutes les sections de vol inventées
+            if not has_valid_flight_info and offer_structure.get("sections"):
+                print("⚠️⚠️⚠️ VALIDATION CRITIQUE : Aucune source valide trouvée pour les vols")
+                print("🔍 Vérification et SUPPRESSION des sections de vol inventées...")
+                
+                sections = offer_structure.get("sections", [])
+                flight_sections_to_remove = []
+                sections_to_keep = []
+                
+                for section in sections:
+                    section_type = (section.get("type", "") or "").lower()
+                    section_title = (section.get("title", "") or "").lower()
+                    section_id = (section.get("id", "") or "").lower()
+                    
+                    # Détecter les sections de vol
+                    is_flight_section = (
+                        section_type == "flights" or 
+                        "vol" in section_title or 
+                        "transport aérien" in section_title or
+                        section_id == "flights"
+                    )
+                    
+                    if is_flight_section:
+                        flight_sections_to_remove.append(section.get("title", "Transport Aérien"))
+                        print(f"   ❌ Section SUPPRIMÉE (inventée) : '{section.get('title', 'Transport Aérien')}'")
+                        # NE PAS ajouter cette section à sections_to_keep
+                    else:
+                        sections_to_keep.append(section)
+                
+                # Si on a supprimé des sections de vol, ajouter une section d'avertissement
+                if flight_sections_to_remove:
+                    print(f"   ⚠️ {len(flight_sections_to_remove)} section(s) de vol SUPPRIMÉE(S)")
+                    warning_section = {
+                        "id": "flight_warning",
+                        "type": "Avertissement",
+                        "title": "⚠️ Informations de vol non disponibles",
+                        "body": "Les informations de vol pour cette route/date ne sont pas disponibles dans nos sources consultées.\n\n⚠️ IMPORTANT : Les horaires, compagnies aériennes et numéros de vol doivent être vérifiés directement auprès des compagnies aériennes avant toute réservation.\n\nMerci de contacter directement les compagnies aériennes pour obtenir les informations de vol actuelles et vérifier les disponibilités."
+                    }
+                    sections_to_keep.insert(0, warning_section)  # Ajouter au début
+                    offer_structure["sections"] = sections_to_keep
+                    print(f"   ✅ Section d'avertissement ajoutée à la place")
+                    print("   ⚠️⚠️⚠️ PROTECTION CLIENT : Les sections de vol inventées ont été SUPPRIMÉES automatiquement")
+                else:
+                    print("   ℹ️ Aucune section de vol détectée (pas besoin de suppression)")
+            
+            # Enrichir les sections de vol avec des preuves (liens et sources) - SEULEMENT si on a des sources valides
+            if has_valid_flight_info:
+                # Si on a des vols réels (Air France-KLM ou Aviationstack), les utiliser comme source
+                if real_flights_data:
+                    source_type = search_metadata.get('source', 'airfrance_klm')
+                    if source_type == 'airfrance_klm':
+                        print("✅✅✅ Utilisation des vols RÉELS d'Air France-KLM comme source")
+                        real_flights_source = {
+                            "type": "Air France-KLM API (Vols réels vérifiables)",
+                            "title": f"Vols réels Air France-KLM - {len(real_flights_data)} vol(s) trouvé(s)",
+                            "url": "https://developer.airfranceklm.com",
+                            "description": f"Vols réels vérifiables depuis l'API Air France-KLM avec horaires, numéros de vol et compagnies aériennes confirmés"
+                        }
+                    else:
+                        print("✅✅✅ Utilisation des vols RÉELS d'Aviationstack comme source")
+                        real_flights_source = {
+                            "type": "Aviationstack (Vols réels vérifiables)",
+                            "title": f"Vols réels {len(real_flights_data)} vol(s) trouvé(s)",
+                            "url": "https://aviationstack.com/",
+                            "description": f"Vols réels vérifiables depuis l'API Aviationstack avec horaires, numéros de vol et compagnies aériennes confirmés"
+                        }
+                    # Ajouter les vols réels aux métadonnées
+                    search_metadata['real_flights'] = real_flights_data
+                    self._enrich_flight_sections_with_sources(offer_structure, None, website_descriptions, search_metadata, real_flights_source=real_flights_source)
+                else:
+                    self._enrich_flight_sections_with_sources(offer_structure, None, website_descriptions, search_metadata, real_flights_source='airfrance_klm' if real_flights_data else None)
+            else:
+                print("⚠️⚠️⚠️ PROTECTION CLIENT : Aucune source valide - pas d'enrichissement des sections de vol (suppression effectuée)")
+            
+            # Nettoyer les URLs d'images du texte dans les sections
+            if offer_structure.get("sections"):
+                image_url_pattern = re.compile(
+                    r'https?://[^\s"\'<>]+\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?[^\s"\'<>]*)?',
+                    re.IGNORECASE
+                )
+                
+                # Pattern pour supprimer les références textuelles aux images
+                image_text_patterns = [
+                    re.compile(r'(?i)(image\s*url|image:\s*|url\s*image|image\s*:\s*http)[^\s]*', re.IGNORECASE),
+                    re.compile(r'(?i)(voir\s*l\'?image|voir\s*image|image\s*ci-dessous|image\s*ci-dessus)[^\n]*', re.IGNORECASE),
+                ]
+                
+                for section in offer_structure["sections"]:
+                    # Nettoyer le body
+                    if section.get("body"):
+                        body = str(section["body"])
+                        # Supprimer les URLs d'images
+                        body = image_url_pattern.sub('', body)
+                        # Supprimer les références textuelles aux images
+                        for pattern in image_text_patterns:
+                            body = pattern.sub('', body)
+                        # Nettoyer les espaces multiples et lignes vides
+                        body = re.sub(r'\n\s*\n\s*\n+', '\n\n', body)  # Max 2 sauts de ligne
+                        body = re.sub(r' +', ' ', body)  # Un seul espace
+                        section["body"] = body.strip()
+                    
+                    # Nettoyer le contenu
+                    if section.get("content"):
+                        content = str(section["content"])
+                        content = image_url_pattern.sub('', content)
+                        for pattern in image_text_patterns:
+                            content = pattern.sub('', content)
+                        content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
+                        content = re.sub(r' +', ' ', content)
+                        section["content"] = content.strip()
+                    
+                    # Nettoyer la description (si elle existe)
+                    if section.get("description"):
+                        description = str(section.get("description"))
+                        description = image_url_pattern.sub('', description)
+                        for pattern in image_text_patterns:
+                            description = pattern.sub('', description)
+                        description = re.sub(r'\n\s*\n\s*\n+', '\n\n', description)
+                        description = re.sub(r' +', ' ', description)
+                        section["description"] = description.strip()
+            
+            # Nettoyer aussi l'introduction
+            if offer_structure.get("introduction"):
+                intro = str(offer_structure["introduction"])
+                image_url_pattern = re.compile(
+                    r'https?://[^\s"\'<>]+\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?[^\s"\'<>]*)?',
+                    re.IGNORECASE
+                )
+                intro = image_url_pattern.sub('', intro)
+                intro = re.sub(r'(?i)(image\s*url|image:\s*|url\s*image)[^\s]*', '', intro)
+                offer_structure["introduction"] = intro.strip()
             
             return Response({
                 "offer_structure": offer_structure,
-                "company_info": company_info
+                "company_info": company_info,
+                "metadata": metadata,  # ✅ Ajouter les métadonnées de traçabilité
+                "scraped_images": scraped_images[:10] if scraped_images else []  # ✅ Ajouter les images scrapées
             })
             
         except Exception as e:
@@ -624,15 +3089,123 @@ EXIGENCES :
         section["images"] = images or []
         return section
 
-    def enrich_sections_with_images(self, offer_structure):
-        """Enrichit chaque section avec des images appropriées"""
-        # Vérifier si les APIs d'images sont configurées
+    def enrich_sections_with_images(self, offer_structure, scraped_images=None):
+        """Enrichit chaque section avec des images appropriées.
+        Priorité aux images scrapées depuis les sites web.
+        Pour les circuits: priorité aux sections Hotel/Hébergement/Activités."""
+        sections = offer_structure.get("sections", [])
+        
+        # Si on a des images scrapées, les utiliser en priorité
+        if scraped_images and len(scraped_images) > 0:
+            print(f"📸 Utilisation de {len(scraped_images)} image(s) scrapée(s) depuis les sites web")
+            
+            # Dédoublonner les images pour éviter les répétitions
+            unique_scraped_images = list(dict.fromkeys(scraped_images))  # Garde l'ordre, supprime les doublons
+            if len(scraped_images) > len(unique_scraped_images):
+                print(f"📸 {len(scraped_images) - len(unique_scraped_images)} image(s) en doublon supprimée(s)")
+            
+            # 🏨 PRIORITÉ pour les sections d'hébergement/hôtel dans les circuits
+            hotel_sections = []
+            activity_sections = []
+            itinerary_sections = []
+            other_sections = []
+            
+            for section in sections:
+                section_type = section.get("type", "").lower()
+                section_title = section.get("title", "").lower()
+                
+                if "hotel" in section_type or "hébergement" in section_title or "hôtel" in section_title:
+                    hotel_sections.append(section)
+                elif "activit" in section_type or "activit" in section_title or "excursion" in section_title:
+                    activity_sections.append(section)
+                elif "itinéraire" in section_title or "itinerary" in section_type or "programme" in section_title:
+                    itinerary_sections.append(section)
+                else:
+                    other_sections.append(section)
+            
+            # Ordre de priorité pour l'attribution des images
+            prioritized_sections = hotel_sections + activity_sections + itinerary_sections + other_sections
+            
+            print(f"   🏨 {len(hotel_sections)} section(s) d'hôtel/hébergement (priorité haute)")
+            print(f"   🎯 {len(activity_sections)} section(s) d'activités (priorité moyenne)")
+            print(f"   🗺️ {len(itinerary_sections)} section(s) d'itinéraire (priorité moyenne)")
+            print(f"   📋 {len(other_sections)} autre(s) section(s)")
+            
+            image_index = 0
+            used_images = set()  # Tracker les images déjà utilisées pour éviter les doublons
+            
+            for section in prioritized_sections:
+                section_type = section.get("type", "").lower()
+                section_title = section.get("title", "").lower()
+                
+                # Déterminer le nombre d'images en fonction du type de section
+                is_hotel_section = "hotel" in section_type or "hébergement" in section_title or "hôtel" in section_title
+                is_activity_section = "activit" in section_type or "activit" in section_title or "excursion" in section_title
+                is_itinerary_section = "itinéraire" in section_title or "itinerary" in section_type or "programme" in section_title
+                
+                # Plus d'images pour les sections importantes
+                target_images = 3 if is_hotel_section else 2 if (is_activity_section or is_itinerary_section) else 2
+                
+                # Pour TOUTES les sections, utiliser des images scrapées si disponibles
+                if image_index < len(unique_scraped_images) and not section.get("image") and not section.get("images"):
+                    section_images = []
+                    # Prendre le nombre d'images ciblé
+                    while len(section_images) < target_images and image_index < len(unique_scraped_images):
+                        image_url = unique_scraped_images[image_index]
+                        if image_url not in used_images:
+                            section_images.append({"url": image_url})
+                            used_images.add(image_url)
+                        image_index += 1
+                    
+                    # Si on n'a pas assez d'images scrapées, compléter avec des images API si disponible
+                    if len(section_images) < target_images and (UNSPLASH_KEY or BING_KEY):
+                        try:
+                            # Chercher des images supplémentaires via API
+                            title = section.get("title", "")
+                            body = section.get("body", "")
+                            
+                            # Créer une requête intelligente basée sur le contenu
+                            if is_hotel_section:
+                                query = f"luxury hotel room {title}"
+                            elif is_activity_section:
+                                query = f"{title} travel activity"
+                            else:
+                                query = f"{title} travel"
+                            
+                            api_images = []
+                            if UNSPLASH_KEY:
+                                api_images = search_unsplash(query, per_page=target_images - len(section_images))
+                            if not api_images and BING_KEY:
+                                api_images = search_bing_images(query, count=target_images - len(section_images))
+                            
+                            for api_img in api_images:
+                                additional_url = api_img.get("url")
+                                if additional_url and additional_url not in used_images:
+                                    section_images.append({"url": additional_url})
+                                    used_images.add(additional_url)
+                                    if len(section_images) >= target_images:
+                                        break
+                        except Exception as e:
+                            print(f"   ⚠️ Erreur recherche image API pour section '{section.get('title')}': {e}")
+                    
+                    if section_images:
+                        section["images"] = section_images
+                        section["image"] = section_images[0]["url"]  # Format simple aussi pour compatibilité
+                        emoji = "🏨" if is_hotel_section else "🎯" if is_activity_section else "📸"
+                        print(f"   {emoji} {len(section_images)} image(s) ajoutée(s) à la section '{section.get('title')}'")
+                elif not section.get("image"):
+                    # Si pas d'image scrapée disponible, chercher via API
+                    # (on continue ci-dessous avec le code existant)
+                    pass
+        
+        # Vérifier si les APIs d'images sont configurées pour les sections restantes
         if not UNSPLASH_KEY and not BING_KEY:
-            print("⚠️ Aucune API d'images configurée - sections sans images")
+            if not scraped_images or len(scraped_images) == 0:
+                print("⚠️ Aucune API d'images configurée et aucune image scrapée - sections sans images")
             return
         
-        # Limiter le nombre de sections pour éviter les timeouts
-        sections_to_process = offer_structure.get("sections", [])[:2]  # Max 2 sections seulement
+        # Limiter le nombre de sections pour éviter les timeouts (seulement pour les sections sans images scrapées)
+        sections_to_process = [s for s in sections if not s.get("image")][:2]  # Max 2 sections seulement
         
         # Traitement asynchrone des images pour éviter les timeouts
         import threading
@@ -661,6 +3234,126 @@ EXIGENCES :
                 thread.join(timeout=remaining_time)
             else:
                 break
+
+    def _enrich_flight_sections_with_sources(self, offer_structure, real_time_search_results, website_descriptions, search_metadata, real_flights_source=None):
+        """Enrichit les sections de vol avec une seule source (la meilleure) pour prouver les informations"""
+        sections = offer_structure.get("sections", [])
+        
+        # Trouver les sections de vol (Flights)
+        flight_sections = [s for s in sections if s.get("type", "").lower() == "flights" or "vol" in s.get("title", "").lower() or "transport aérien" in s.get("title", "").lower()]
+        
+        if not flight_sections:
+            print("ℹ️ Aucune section de vol trouvée pour enrichissement avec sources")
+            return
+        
+        print(f"📋 Enrichissement de {len(flight_sections)} section(s) de vol avec une source de preuve...")
+        
+        # Préparer la meilleure source disponible (priorité : Aviationstack > Tavily > Sites web)
+        best_source = None
+        
+        # Priorité 1 : Source Air France-KLM ou Aviationstack (vols RÉELS) - LA MEILLEURE SOURCE
+        if real_flights_source:
+            best_source = real_flights_source
+            source_name = "Air France-KLM" if "Air France-KLM" in best_source.get('type', '') else "Aviationstack"
+            print(f"   ✅✅✅ Source {source_name} (vols RÉELS) sélectionnée: {best_source['title']}")
+        
+        # Priorité 2 : Source depuis Tavily (recherche en temps réel) - seulement si pas de vols réels
+        if not best_source and real_time_search_results:
+            print(f"🔗 {len(real_time_search_results)} source(s) Tavily disponibles pour les vols")
+            for result in real_time_search_results:
+                url = result.get("url", "")
+                content = result.get("content", "").lower() or result.get("raw_content", "").lower()
+                
+                # Vérifier que le résultat contient réellement des infos de vol (pas juste "aucun vol trouvé")
+                if url and content:
+                    # Détecter les messages négatifs (pas de vol trouvé, aucun résultat, etc.)
+                    negative_indicators = [
+                        "aucun vol", "no flights", "no results", "aucun résultat",
+                        "pas de vol", "vols non disponibles", "not available",
+                        "aucune disponibilité", "no availability", "not found"
+                    ]
+                    has_negative_indicator = any(indicator in content for indicator in negative_indicators)
+                    
+                    if has_negative_indicator:
+                        print(f"   ⚠️ Source Tavily exclue (message négatif détecté): {result.get('title', 'Source')}")
+                        continue
+                    
+                    # Vérifier qu'il y a des infos positives (numéro de vol, horaires, compagnie, etc.)
+                    positive_indicators = [
+                        "vol", "flight", "departure", "départ", "arrival", "arrivée",
+                        "airline", "compagnie", "terminal", "horaires", "schedule"
+                    ]
+                    has_positive_indicator = any(indicator in content for indicator in positive_indicators)
+                    
+                    if has_positive_indicator:
+                        best_source = {
+                            "type": "Tavily (Recherche temps réel)",
+                            "title": result.get("title", "Source Tavily"),
+                            "url": url,
+                            "description": "Recherche en temps réel pour horaires et prix des vols"
+                        }
+                        print(f"   ✅ Source Tavily sélectionnée: {best_source['title']} - {best_source['url']}")
+                        break
+                    else:
+                        print(f"   ⚠️ Source Tavily exclue (pas d'infos de vol valides): {result.get('title', 'Source')}")
+                elif url:
+                    # Si on a une URL mais pas de contenu, on peut quand même l'utiliser
+                    best_source = {
+                        "type": "Tavily (Recherche temps réel)",
+                        "title": result.get("title", "Source Tavily"),
+                        "url": url,
+                        "description": "Recherche en temps réel pour horaires et prix des vols"
+                    }
+                    print(f"   ✅ Source Tavily sélectionnée (sans contenu): {best_source['title']} - {best_source['url']}")
+                    break
+        
+        # Priorité 2 : Source depuis les sites web scrapés (si pas de Tavily)
+        if not best_source and website_descriptions:
+            print(f"🔗 {len(website_descriptions)} site(s) web scrapé(s) disponibles comme sources")
+            for desc in website_descriptions:
+                url = desc.get("url", "")
+                if url:
+                    # Vérifier si le contenu contient des infos de vol
+                    content = desc.get("content", "").lower()
+                    if any(keyword in content for keyword in ["vol", "flight", "compagnie", "airline", "aéroport", "départ", "arrivée"]):
+                        best_source = {
+                            "type": "Site web scrapé",
+                            "title": f"Site web: {url[:50]}...",
+                            "url": url,
+                            "description": "Informations de vol extraites depuis le site web"
+                        }
+                        print(f"   ✅ Source Site web sélectionnée: {best_source['url']}")
+                        break
+        
+        # Logs détaillés
+        if best_source:
+            print(f"📊 Source de preuve sélectionnée pour les vols:")
+            print(f"   Type: {best_source['type']}")
+            print(f"   Titre: {best_source['title']}")
+            print(f"   URL: {best_source['url']}")
+            print(f"   Description: {best_source['description']}")
+        else:
+            print("⚠️ Aucune source de preuve disponible pour les vols (pas de recherche Tavily ni de sites web avec infos de vol)")
+        
+        # Ajouter la source unique à chaque section de vol (METADATA SEULEMENT - PAS DE TEXTE)
+        for flight_section in flight_sections:
+            section_title = flight_section.get("title", "Transport Aérien")
+            print(f"\n✈️ Enrichissement section '{section_title}' avec source (metadata seulement)...")
+            
+            # Ajouter un champ "source" (singulier) avec le lien - METADATA SEULEMENT
+            if best_source:
+                flight_section["source"] = best_source  # Champ singulier pour métadonnées
+                print(f"   ✅ Source ajoutée aux métadonnées de la section '{section_title}' (pas de modification du texte)")
+                
+                # ❌ NE PLUS ajouter le lien dans le body - l'utilisateur ne veut pas de sources/références dans le texte
+                # Le body reste tel quel, sans ajout de source
+            else:
+                print(f"   ⚠️ Aucune source disponible pour la section '{section_title}'")
+                flight_section["source"] = None
+                
+                # ❌ NE PLUS ajouter de note critique dans le body
+                # Le body reste tel quel, même si les informations sont inventées
+                print(f"   ℹ️ Pas de source mais pas de note critique ajoutée (texte propre demandé par l'utilisateur)")
 
 
 class PDFOfferGenerator(APIView):
@@ -906,43 +3599,87 @@ class PdfToGJSEndpoint(APIView):
 
     def _md_to_offer_json(self, markdown_text, company_info, assets=[]):
         """Demande à l'IA de mapper le texte → JSON sections normalisées."""
-        sys = "Tu es un assistant qui structure des offres de voyage. Réponds en JSON strict."
+        sys = """Tu es un assistant qui structure des offres de voyage. Réponds en JSON strict.
+
+⚠️ RÈGLE ABSOLUE: TU DOIS CONSERVER 100% DU TEXTE ORIGINAL DU PDF.
+- Ne coupe RIEN. Ne supprime AUCUNE information.
+- Garde TOUTES les journées du programme jour par jour (Jour 1, Jour 2, Jour 3, etc.)
+- Garde TOUS les détails horaires (départ, arrivée, heures)
+- Garde TOUTES les descriptions des activités, visites, restaurants
+- Garde TOUS les détails pratiques, conditions, notes
+- Garde TOUTES les listes (inclus, non inclus, à prévoir)
+- Tu peux uniquement reformater en markdown pour améliorer la lisibilité, mais tu ne peux PAS omettre une seule information.
+Ton rôle est uniquement de STRUCTURER et ORGANISER le texte existant, JAMAIS de le résumer ou condenser."""
         
-        # Préparer la liste des images disponibles
+        # Préparer la liste des images disponibles avec leurs data URLs
         images_info = ""
         if assets:
-            images_info = f"\nImages disponibles ({len(assets)} images):\n"
+            images_info = f"\n🖼️🖼️🖼️ IMAGES DISPONIBLES DEPUIS LE PDF ({len(assets)} images) - UTILISE-LES DANS LES SECTIONS :\n"
             for i, asset in enumerate(assets):
-                images_info += f"- Image {i+1}: {asset['name']} (page {asset['page']}, {asset['width']}x{asset['height']}px)\n"
+                images_info += f"\n--- Image {i+1} ---\n"
+                images_info += f"Nom: {asset['name']}\n"
+                images_info += f"Page: {asset['page']}\n"
+                images_info += f"Dimensions: {asset['width']}x{asset['height']}px\n"
+                images_info += f"Data URL: {asset['data_url'][:100]}...\n"
+                images_info += f"Index pour référence: {i}\n"
+            images_info += "\n🚨🚨🚨 CRITIQUE - ASSOCIATION DES IMAGES AUX SECTIONS :\n"
+            images_info += "- Associe intelligemment les images aux sections appropriées selon leur contenu/type\n"
+            images_info += "- Images d'avions/aéroports → section Flights\n"
+            images_info += "- Images d'hôtels/chambres/piscines → section Hotel\n"
+            images_info += "- Images d'activités/paysages → section Activities ou Programme\n"
+            images_info += "- Autres images → section la plus appropriée\n"
+            images_info += "- Si tu ne peux pas déterminer la section, place-les dans une section générale ou dans l'introduction\n"
+            images_info += "- UTILISE les data URLs fournies ci-dessus pour chaque image dans le champ 'images' de la section\n"
+            images_info += "- Format pour images: [{\"url\": \"data_url_complet\", \"alt\": \"description\"}]\n"
         
         user = f"""
 Voici le contenu d'une offre (Markdown, possible désordre). Déduis les sections:
 - Flights (transport: vols, trajets, horaires, classe)
 - Hotel (hébergement)
 - Price (tarifs, conditions, inclus/exclus)
+- Programme ou Itinéraire (si le PDF contient un programme jour par jour, crée une section dédiée avec TOUTES les journées, aucune exception)
+- Activities (activités, visites, excursions)
+- Transfers (transports locaux)
+- Info (informations pratiques, conditions, notes)
 - CTA (appel à l'action)
-- Facultatif: d'autres sections pertinentes (type 'Info', 'Activities', etc.) MAIS ne mets que celles utiles.
+- et autres sections pertinentes selon le contenu
 
 {images_info}
 
-Contraintes:
+Contraintes CRITIQUES:
 - Réponds JSON STRICT sans texte autour.
 - Garde les champs: title (string), introduction (string), sections (array), cta (object).
-- Chaque section: {{"id":"slug","type":"Flights|Hotel|Price|Info|Activities|...","title":"...","body":"...","images":[...]}}
+- Chaque section: {{"id":"slug","type":"Flights|Hotel|Price|Info|Activities|Programme|Itinéraire|...","title":"...","body":"...","images":[...]}}
+
+⚠️⚠️⚠️ RÈGLE CRITIQUE ABSOLUE POUR LE CHAMP "body": ⚠️⚠️⚠️
+- CONSERVE 100% DU TEXTE ORIGINAL. Ne coupe ABSOLUMENT RIEN.
+- Si le PDF a un programme jour par jour avec 15 journées, tu dois TOUTES les mettre dans le body (Jour 1, Jour 2, ... Jour 15).
+- Si le PDF détaille chaque activité, visite, restaurant, transport, tu dois TOUT garder.
+- Si le PDF a des listes d'inclus/non inclus, conditions, notes, tu dois TOUT garder.
+- Si un texte fait 2000 mots dans le PDF, il doit faire ~2000 mots dans ton body.
+- Si un texte fait 5000 mots dans le PDF, il doit faire ~5000 mots dans ton body.
+- Tu peux UNIQUEMENT reformater en markdown (ajouter des titres ##, listes - , etc.) pour améliorer la lisibilité.
+- Interdiction totale de résumer, condenser, omettre, ou dire "etc." à la place de lister tous les éléments.
 - body en texte enrichi (markdown simple), pas de HTML.
-- IMPORTANT: Si des images sont disponibles, associe-les intelligemment aux sections appropriées :
+- IMPORTANT: Si des images sont disponibles (voir section "IMAGES DISPONIBLES DEPUIS LE PDF" ci-dessus), associe-les intelligemment aux sections appropriées :
   * Images d'avions/aéroports → section Flights
   * Images d'hôtels/chambres/piscines → section Hotel  
-  * Images d'activités/paysages → section Activities
+  * Images d'activités/paysages → section Activities ou Programme
   * Autres images → section la plus appropriée
-- Pour chaque image associée, utilise: {{"index": X, "description": "description de l'image"}} où X est le numéro de l'image (0-based)
+- Pour chaque image associée à une section, ajoute un champ "images" (array) avec les objets image:
+  {{"images": [{{"url": "data_url_complet_de_l_image", "alt": "description de l'image"}}]}}
+- UTILISE les data URLs exactes fournies dans la section "IMAGES DISPONIBLES DEPUIS LE PDF" ci-dessus
+- Place les images dans le champ "images" de chaque section, pas dans le "body"
 
 Contenu:
 {markdown_text}
         """
         res = client.chat.completions.create(
             model="gpt-4o-mini",
-            temperature=0.3,
+            temperature=0.1,  # Plus bas pour plus de fidélité au texte original
+            # Note: max_tokens non spécifié = utilise la limite par défaut (16384)
+            # Coût réel = tokens générés (output), pas la limite maximale
+            # gpt-4o-mini est très économique: ~$0.15/$0.60 par 1M tokens (entrée/sortie)
             messages=[
                 {"role": "system", "content": sys},
                 {"role": "user", "content": user}
@@ -958,6 +3695,88 @@ Contenu:
         data.setdefault("introduction", "")
         data.setdefault("sections", [])
         data.setdefault("cta", {"title":"Réservez maintenant","description":"","buttonText":"Réserver"})
+
+        # Post-traitement: enrichir les sections avec les images extraites du PDF
+        if assets and len(assets) > 0:
+            print(f"🖼️ Enrichissement des sections avec {len(assets)} image(s) extraite(s) du PDF...")
+            # Créer un mapping des images disponibles
+            images_by_type = {
+                'flights': [],  # Images d'avions/aéroports
+                'hotel': [],    # Images d'hôtels/chambres/piscines
+                'activities': [], # Images d'activités/paysages
+                'other': []     # Autres images
+            }
+            
+            # Classifier les images selon leur nom/page (heuristique simple)
+            for asset in assets:
+                name_lower = asset['name'].lower()
+                # Heuristique basée sur le nom de l'image
+                if any(keyword in name_lower for keyword in ['avion', 'airport', 'aeroport', 'flight', 'vol']):
+                    images_by_type['flights'].append(asset)
+                elif any(keyword in name_lower for keyword in ['hotel', 'chambre', 'room', 'piscine', 'pool', 'spa']):
+                    images_by_type['hotel'].append(asset)
+                elif any(keyword in name_lower for keyword in ['activite', 'activity', 'paysage', 'landscape', 'excursion']):
+                    images_by_type['activities'].append(asset)
+                else:
+                    images_by_type['other'].append(asset)
+            
+            # Enrichir les sections avec les images appropriées
+            for section in data.get("sections", []):
+                section_type = (section.get("type") or "").lower()
+                section_id = (section.get("id") or "").lower()
+                
+                # Vérifier si la section a déjà des images
+                if "images" not in section or not section["images"]:
+                    section["images"] = []
+                
+                # Associer les images selon le type de section
+                images_to_add = []
+                if section_type in ['flights', 'flight', 'transport'] or section_id in ['flights', 'flight']:
+                    images_to_add = images_by_type['flights'][:2]  # Max 2 images par section
+                elif section_type in ['hotel', 'hebergement'] or section_id in ['hotel', 'hebergement']:
+                    images_to_add = images_by_type['hotel'][:2]
+                elif section_type in ['activities', 'activities', 'programme', 'itinerary', 'itineraire'] or section_id in ['activities', 'activities', 'programme', 'itinerary']:
+                    images_to_add = images_by_type['activities'][:2]
+                
+                # Si aucune image spécifique trouvée, utiliser les images "other"
+                if not images_to_add:
+                    images_to_add = images_by_type['other'][:2]
+                
+                # Ajouter les images à la section (format pour Puck editor)
+                for asset in images_to_add:
+                    # Vérifier que l'image n'est pas déjà dans la section
+                    if not any(img.get("url") == asset["data_url"] for img in section["images"]):
+                        section["images"].append({
+                            "url": asset["data_url"],
+                            "alt": asset.get("name", "Image du PDF"),
+                            "caption": f"Image extraite de la page {asset.get('page', '?')} du PDF"
+                        })
+            
+            # Si certaines images n'ont pas été associées, les placer dans une section générale
+            all_used_images = []
+            for section in data.get("sections", []):
+                for img in section.get("images", []):
+                    if img.get("url"):
+                        all_used_images.append(img["url"])
+            
+            unused_images = [asset for asset in assets if asset["data_url"] not in all_used_images]
+            if unused_images:
+                print(f"  ⚠️ {len(unused_images)} image(s) non associée(s), ajout dans les sections...")
+                # Ajouter dans les sections qui n'ont pas déjà trop d'images
+                remaining_unused = list(unused_images)
+                for section in data.get("sections", []):
+                    if len(section.get("images", [])) < 3 and remaining_unused:
+                        for asset in remaining_unused[:3]:
+                            section.setdefault("images", []).append({
+                                "url": asset["data_url"],
+                                "alt": asset.get("name", "Image du PDF"),
+                                "caption": f"Image extraite de la page {asset.get('page', '?')} du PDF"
+                            })
+                        remaining_unused = remaining_unused[3:]
+                    if not remaining_unused:
+                        break
+            
+            print(f"✅ Enrichissement terminé - images intégrées dans les sections")
 
         return data
 
@@ -1004,7 +3823,10 @@ JSON:
             raw = raw.split("```json")[-1].split("```")[0]
         improved = json.loads(raw)
 
-        return Response({"offer_structure": improved})
+        # ImproveOfferEndpoint ne génère pas d'offre, donc pas de metadata
+        return Response({
+            "offer_structure": improved
+        })
 
 
 class DocumentListCreateView(ListCreateAPIView):
@@ -1506,3 +4328,92 @@ class DocumentMoveToFolderView(APIView):
             return Response({'error': 'Document non trouvé'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class FreepikImageSearchView(APIView):
+    """
+    Proxy pour rechercher des images via l'API Freepik.
+    Résout les problèmes CORS en passant par le backend.
+    """
+    permission_classes = [AllowAny]
+    
+    def get(self, request):
+        """
+        Recherche d'images Freepik
+        
+        Query params:
+        - query: Terme de recherche (requis)
+        - page: Numéro de page (défaut: 1)
+        - limit: Nombre d'images par page (défaut: 30, max: 50)
+        """
+        try:
+            query = request.GET.get('query', '').strip()
+            page = int(request.GET.get('page', 1))
+            limit = min(int(request.GET.get('limit', 30)), 50)  # Max 50
+            
+            if not query:
+                return Response(
+                    {'error': 'Le paramètre "query" est requis'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Clé API Freepik depuis settings
+            api_key = getattr(settings, 'FREEPIK_API_KEY', 'FPSXdbb31bca84c6e7f77a957daa99cbd3b6')
+            
+            # Appel à l'API Freepik avec filtres pour wallpapers/photos
+            freepik_url = 'https://api.freepik.com/v1/resources'
+            params = {
+                'locale': 'en-US',
+                'term': query,
+                'page': page,
+                'limit': limit,
+                'order': 'relevance',  # Meilleure pertinence pour les recherches
+                # Filtres pour avoir des vraies photos (pas flat backgrounds)
+                'filters[content_type][photo]': 1,  # Seulement des photos
+                'filters[orientation][landscape]': 1,  # Format paysage (wallpaper)
+            }
+            headers = {
+                'Content-Type': 'application/json',
+                'X-Freepik-API-Key': api_key
+            }
+            
+            print(f"🔍 Freepik API: Recherche '{query}' (page {page}, limit {limit})")
+            print(f"   📸 Filtres: photos uniquement, format paysage (wallpaper)")
+            
+            response = requests.get(freepik_url, params=params, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                images_count = len(data.get('data', []))
+                print(f"✅ Freepik API: {images_count} images trouvées")
+                
+                return Response(data, status=status.HTTP_200_OK)
+            else:
+                error_data = response.json() if response.content else {}
+                print(f"❌ Freepik API error {response.status_code}: {error_data}")
+                
+                return Response(
+                    {
+                        'error': f'Erreur Freepik API: {response.status_code}',
+                        'details': error_data
+                    },
+                    status=response.status_code
+                )
+                
+        except requests.Timeout:
+            return Response(
+                {'error': 'Timeout de l\'API Freepik'},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
+            )
+        except requests.RequestException as e:
+            print(f"❌ Erreur réseau Freepik: {str(e)}")
+            return Response(
+                {'error': f'Erreur réseau: {str(e)}'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except Exception as e:
+            print(f"❌ Erreur Freepik proxy: {str(e)}")
+            traceback.print_exc()
+            return Response(
+                {'error': f'Erreur serveur: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

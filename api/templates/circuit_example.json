@@ -1,0 +1,48 @@
+{
+  "title": "Circuit Découverte : L'Essence de la Grèce Antique",
+  "introduction": "Plongez au cœur de la civilisation grecque avec ce circuit exceptionnel de 8 jours. D'Athènes à Santorin, découvrez les trésors antiques, les îles enchanteresses et la gastronomie méditerranéenne. Un voyage où histoire et beauté se rencontrent pour créer des souvenirs inoubliables.",
+  "sections": [
+    {
+      "id": "flights",
+      "type": "Flights",
+      "title": "Transport Aérien",
+      "body": "Vol aller-retour Paris - Athènes\n\nCompagnie : Air France\nNuméro de vol aller : AF 1234\nDépart : Paris CDG le 15 juin 2025 à 08h30\nArrivée : Athènes (ATH) le 15 juin 2025 à 13h15\nDurée : 3h45\n\nNuméro de vol retour : AF 1235\nDépart : Athènes (ATH) le 22 juin 2025 à 14h30\nArrivée : Paris CDG le 22 juin 2025 à 17h15\nDurée : 3h45\n\nClasse : Économique\nBagages : 1 bagage cabine (12 kg) + 1 bagage en soute (23 kg)\nRepas : Repas chaud servi à bord avec choix de plats\nAccès : Wi-Fi disponible (payant) et divertissements à bord"
+    },
+    {
+      "id": "transfers",
+      "type": "Transfers",
+      "title": "Transferts & Transport",
+      "body": "Transferts privés inclus tout au long du circuit\n\nTransfert aéroport-hôtel : Véhicule confortable avec chauffeur francophone\nTransferts inter-villes : Bus de tourisme climatisé avec guide accompagnateur\nTransfert vers le port : Minibus pour les départs en ferry vers les îles\n\nTous les transferts sont organisés avec prise en charge à l'heure convenue et assistance bagages."
+    },
+    {
+      "id": "itinerary",
+      "type": "Itinéraire",
+      "title": "Programme du Circuit",
+      "body": "Jour 1 : Arrivée à Athènes\nArrivée à l'aéroport d'Athènes, accueil et transfert à l'hôtel. Installation et temps libre pour se reposer. En soirée, dîner de bienvenue dans un restaurant traditionnel avec vue sur l'Acropole illuminée.\n\nJour 2 : Découverte d'Athènes\nPetit-déjeuner à l'hôtel. Visite guidée de l'Acropole et du musée de l'Acropole (matin). Déjeuner libre dans le quartier de Plaka. Après-midi libre pour explorer le centre historique. Dîner libre.\n\nJour 3 : Athènes - Delphes\nPetit-déjeuner et départ pour Delphes (3h de route). Visite du site archéologique de Delphes et du musée. Déjeuner dans un restaurant local. Route vers Kalambaka. Installation à l'hôtel et dîner inclus.\n\nJour 4 : Météores\nPetit-déjeuner. Visite des monastères des Météores suspendus dans les airs. Déjeuner libre. Route vers Athènes. Installation à l'hôtel. Dîner libre.\n\nJour 5 : Athènes - Santorin\nPetit-déjeuner. Transfert au port du Pirée. Embarquement sur le ferry vers Santorin (traversée de 5h). Arrivée à Santorin, transfert à l'hôtel. Installation et temps libre. Dîner libre.\n\nJour 6 : Santorin\nPetit-déjeuner. Journée libre pour explorer l'île. Possibilité d'excursion optionnelle vers Oia pour le coucher de soleil. Déjeuner et dîner libres.\n\nJour 7 : Santorin\nPetit-déjeuner. Journée libre. Excursion optionnelle : visite d'une cave à vin avec dégustation, baignade sur les plages volcaniques. Déjeuner et dîner libres.\n\nJour 8 : Santorin - Athènes - Paris\nPetit-déjeuner. Transfert au port et ferry de retour vers Athènes. Arrivée au port du Pirée, transfert à l'aéroport. Vol retour vers Paris."
+    },
+    {
+      "id": "hotel",
+      "type": "Hotel",
+      "title": "Hébergement",
+      "body": "Athènes (3 nuits) : Hôtel 4 étoiles en centre-ville\nHôtel Plaka ou similaire\nChambre double standard avec petit-déjeuner buffet\nSituation : À 5 minutes à pied de l'Acropole\nÉquipements : Wi-Fi gratuit, climatisation, TV, minibar\n\nKalambaka (1 nuit) : Hôtel 3 étoiles\nHôtel avec vue sur les Météores\nChambre double standard avec petit-déjeuner\nSituation : Au pied des rochers des Météores\nÉquipements : Wi-Fi gratuit, restaurant, bar\n\nSantorin (3 nuits) : Hôtel 4 étoiles avec vue sur la caldera\nHôtel avec piscine et terrasse panoramique\nChambre double standard avec petit-déjeuner\nSituation : Village de Fira, vue exceptionnelle sur le volcan\nÉquipements : Piscine, spa, restaurant, Wi-Fi gratuit, climatisation"
+    },
+    {
+      "id": "activities",
+      "type": "Activities",
+      "title": "Activités & Excursions",
+      "body": "Visites guidées incluses :\n- Acropole d'Athènes avec guide professionnel\n- Musée de l'Acropole (entrées incluses)\n- Site archéologique de Delphes et musée\n- Monastères des Météores (visite de 2 monastères)\n\nExcursions optionnelles :\n- Excursion à Oia au coucher de soleil : 45€ par personne\n- Visite cave à vin avec dégustation : 35€ par personne\n- Excursion en bateau vers le volcan : 65€ par personne\n- Dégustation de produits locaux : 25€ par personne"
+    },
+    {
+      "id": "price",
+      "type": "Price",
+      "title": "Tarifs & Conditions",
+      "body": "Prix par personne : À partir de 1 450€\n\nLe prix comprend :\n- Vols aller-retour Paris-Athènes en classe économique\n- Tous les transferts mentionnés\n- Hébergement en hôtels 3-4 étoiles avec petit-déjeuner\n- Ferry Athènes-Santorin aller-retour\n- Visites guidées mentionnées avec entrées\n- Accompagnateur francophone\n- Taxes d'aéroport et taxes locales\n\nLe prix ne comprend pas :\n- Déjeuners et dîners (sauf mentionnés)\n- Excursions optionnelles\n- Boissons\n- Dépenses personnelles\n- Assurance voyage (fortement recommandée)\n\nConditions de réservation :\n- Acompte : 30% à la réservation\n- Solde : 30 jours avant le départ\n- Annulation : 30 jours avant = 20% de frais, moins de 30 jours = 100% de frais\n- Modification : 50€ de frais par modification"
+    }
+  ],
+  "cta": {
+    "title": "Réservez votre circuit en Grèce",
+    "description": "Offre limitée - Places disponibles pour juin 2025",
+    "buttonText": "Réserver maintenant"
+  }
+}
+
