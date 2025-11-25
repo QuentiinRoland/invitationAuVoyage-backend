@@ -41,12 +41,9 @@ COPY . .
 # Collecter les fichiers statiques
 RUN python manage.py collectstatic --no-input
 
-# Créer le superuser (si les vars d'env sont définies)
-RUN python create_superuser.py || echo "Superuser creation skipped"
-
 # Port exposé
 EXPOSE 8000
 
-# Commande de démarrage
-CMD ["sh", "-c", "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
+# Commande de démarrage (migrations + superuser au démarrage, pas au build)
+CMD ["sh", "-c", "python manage.py migrate && python create_superuser.py && gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
 
