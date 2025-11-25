@@ -8,7 +8,7 @@ bind = f"0.0.0.0:{os.getenv('PORT', '8000')}"
 workers = 2  # Render Free tier a des limites de RAM
 worker_class = "sync"
 worker_connections = 1000
-timeout = 60  # Timeout plus long pour les tâches lourdes (génération PDF)
+timeout = 120  # Timeout plus long pour les tâches lourdes (génération PDF + OpenAI)
 keepalive = 2
 max_requests = 1000
 max_requests_jitter = 100
@@ -29,7 +29,7 @@ limit_request_field_size = 8190
 worker_tmp_dir = "/dev/shm"
 
 # Configuration des signaux
-graceful_timeout = 30
+graceful_timeout = 60
 
 # Configuration du proxy (important pour Render)
 forwarded_allow_ips = "*"

@@ -2744,7 +2744,8 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=2500,
-                temperature=0.7
+                temperature=0.7,
+                timeout=90  # Timeout de 90 secondes pour éviter les worker timeouts
             )
             
             offer_json = response.choices[0].message.content
@@ -3674,17 +3675,28 @@ Contraintes CRITIQUES:
 Contenu:
 {markdown_text}
         """
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.1,  # Plus bas pour plus de fidélité au texte original
-            # Note: max_tokens non spécifié = utilise la limite par défaut (16384)
-            # Coût réel = tokens générés (output), pas la limite maximale
-            # gpt-4o-mini est très économique: ~$0.15/$0.60 par 1M tokens (entrée/sortie)
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": user}
-            ]
-        )
+        try:
+            res = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.1,  # Plus bas pour plus de fidélité au texte original
+                timeout=90,  # Timeout de 90 secondes pour éviter les worker timeouts
+                # Note: max_tokens non spécifié = utilise la limite par défaut (16384)
+                # Coût réel = tokens générés (output), pas la limite maximale
+                # gpt-4o-mini est très économique: ~$0.15/$0.60 par 1M tokens (entrée/sortie)
+                messages=[
+                    {"role": "system", "content": sys},
+                    {"role": "user", "content": user}
+                ]
+            )
+        except Exception as e:
+            print(f"❌ Erreur OpenAI API: {e}")
+            # Retourner une structure minimale en cas d'erreur
+            return {
+                "title": "Erreur lors de l'import",
+                "introduction": f"Une erreur est survenue lors du traitement du PDF: {str(e)}",
+                "sections": [],
+                "cta": {"title":"Réservez maintenant","description":"","buttonText":"Réserver"}
+            }
         raw = res.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```json")[-1].split("```")[0]
@@ -3816,6 +3828,7 @@ JSON:
         res = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.5,
+            timeout=90,  # Timeout de 90 secondes pour éviter les worker timeouts
             messages=[{"role":"system","content":sys},{"role":"user","content":prompt}]
         )
         raw = res.choices[0].message.content.strip()
