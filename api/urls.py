@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
-    APIRootView, TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint, ImproveOfferEndpoint,
-    DocumentGeneratePDFView, PDFOfferGenerator, FreepikImageSearchView
+    APIRootView, TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint, PdfJobStatusEndpoint,
+    ImproveOfferEndpoint, DocumentGeneratePDFView, PDFOfferGenerator, FreepikImageSearchView
 )
 from .auth_views import (
     RegisterView, LoginView, LogoutView, ProfileView, ChangePasswordView, CheckAuthView,
@@ -34,6 +34,7 @@ urlpatterns = [
     path("generate-pdf-offer/", PDFOfferGenerator.as_view(), name="generate-pdf-offer"),
     path("grapesjs-pdf-generator/", GrapesJSPDFGenerator.as_view(), name="grapesjs-pdf-generator"),
     path("pdf-to-gjs/", PdfToGJSEndpoint.as_view(), name="pdf-to-gjs"),
+    path("pdf-job-status/<str:job_id>/", PdfJobStatusEndpoint.as_view(), name="pdf-job-status"),
     path("improve-offer/", ImproveOfferEndpoint.as_view(), name="improve-offer"),
     
     # Gestion des documents sauvegardés (nécessite authentification)
