@@ -9,9 +9,9 @@ echo "🚀 Début du build pour Render..."
 echo "📦 Installation des dépendances Python..."
 pip install -r requirements.txt
 
-# Installer les navigateurs Playwright pour le scraping de sites JavaScript
-echo "🎭 Installation des navigateurs Playwright..."
-playwright install chromium --with-deps || echo "⚠️ Playwright installation partielle - continuons quand même"
+# Note: Playwright nécessite des droits root sur Render (pas disponible en free tier)
+# Solution recommandée: Configurer UNSPLASH_ACCESS_KEY ou TAVILY_API_KEY dans Environment
+# Ces APIs fonctionnent mieux sur Render et garantissent des images
 
 # WeasyPrint est utilisé pour la génération PDF professionnelle
 # C'est la solution standard pour Django en production (pas de binaire Chromium requis)
