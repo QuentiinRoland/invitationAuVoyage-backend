@@ -3539,17 +3539,22 @@ class PdfToGJSEndpoint(APIView):
             if not offer_structure or not offer_structure.get('sections') or len(offer_structure.get('sections', [])) == 0:
                 raise Exception("Aucun contenu structuré n'a pu être extrait du PDF")
 
-            # Sauvegarder automatiquement le document importé (SANS les images pour économiser RAM)
+            # Sauvegarder automatiquement le document importé (MAX 5 images pour économiser RAM)
             try:
+                # Limiter à 5 images pour éviter crash RAM (14 images = 400MB = crash)
+                limited_assets = assets[:5] if len(assets) > 5 else assets
+                if len(assets) > 5:
+                    print(f"⚠️ {len(assets)} images extraites, limitées à 5 pour économie RAM")
+                
                 document = Document.objects.create(
                     title=offer_structure.get('title', 'PDF Importé'),
                     description=f"Document importé le {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
                     document_type='pdf_import',
                     offer_structure=offer_structure,
                     company_info=company_info,
-                    assets=[]  # Images pas sauvegardées en BDD (trop gros = crash RAM)
+                    assets=limited_assets  # Max 5 images
                 )
-                print(f"✅ Document sauvegardé SANS images (économie RAM)")
+                print(f"✅ Document sauvegardé avec {len(limited_assets)} image(s)")
                 
                 # Sauvegarder le fichier PDF original
                 pdf.seek(0)  # Reset file pointer
