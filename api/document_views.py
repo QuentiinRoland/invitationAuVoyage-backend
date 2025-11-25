@@ -2,7 +2,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.shortcuts import get_object_or_404
 from django.db import models
 from .models import Document, Folder, DocumentAsset
@@ -15,16 +15,21 @@ class DocumentListCreateView(ListCreateAPIView):
     POST: Crée un nouveau document pour l'utilisateur connecté
     """
     serializer_class = DocumentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]  # TEMPORAIRE pour démo client
 
     def get_queryset(self):
         """Filtrer les documents par utilisateur connecté"""
-        # Seuls les documents de l'utilisateur connecté
-        return Document.objects.filter(owner=self.request.user).order_by('-updated_at')
+        # Si connecté, montrer ses documents, sinon tous
+        if self.request.user.is_authenticated:
+            return Document.objects.filter(owner=self.request.user).order_by('-updated_at')
+        return Document.objects.all().order_by('-updated_at')
 
     def perform_create(self, serializer):
-        """Associer le document à l'utilisateur connecté"""
-        serializer.save(owner=self.request.user)
+        """Associer le document à l'utilisateur connecté si authentifié"""
+        if self.request.user.is_authenticated:
+            serializer.save(owner=self.request.user)
+        else:
+            serializer.save()  # Sans owner si pas connecté
 
 
 class DocumentDetailView(RetrieveUpdateDestroyAPIView):
@@ -34,11 +39,13 @@ class DocumentDetailView(RetrieveUpdateDestroyAPIView):
     DELETE: Supprime un document
     """
     serializer_class = DocumentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]  # TEMPORAIRE pour démo client
 
     def get_queryset(self):
         """Filtrer les documents par utilisateur connecté"""
-        return Document.objects.filter(owner=self.request.user)
+        if self.request.user.is_authenticated:
+            return Document.objects.filter(owner=self.request.user)
+        return Document.objects.all()  # Tous les documents si pas connecté
 
 
 class FolderListCreateView(ListCreateAPIView):
