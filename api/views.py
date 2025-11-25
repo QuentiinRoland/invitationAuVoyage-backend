@@ -3559,6 +3559,10 @@ class PdfToGJSEndpoint(APIView):
                 
                 offer_structure = self._md_to_offer_json(text_md, company_info, assets)
                 
+                # Vérifier que le contenu est valide avant de sauvegarder
+                if not offer_structure or not offer_structure.get('sections') or len(offer_structure.get('sections', [])) == 0:
+                    raise Exception("Aucun contenu structuré n'a pu être extrait du PDF")
+                
                 update_job_status(job_id, "processing", {
                     "progress": 80,
                     "message": "Sauvegarde du document..."
@@ -3682,9 +3686,11 @@ class PdfToGJSEndpoint(APIView):
                             pix = None
                         continue
                     
-                    # Vérifier que l'image n'est pas trop grande (limite à 500KB pour économie RAM)
-                    if len(img_bytes) > 512 * 1024:  # 500KB max par image
+                    # Vérifier que l'image n'est pas trop grande (limite à 1MB pour économie RAM)
+                    if len(img_bytes) > 1024 * 1024:  # 1MB max par image
                         print(f"⚠️ Image trop grande ({len(img_bytes)/1024:.0f}KB) - ignorée")
+                        if pix:
+                            pix = None
                         continue
                     
                     b64 = base64.b64encode(img_bytes).decode("ascii")
@@ -3740,8 +3746,8 @@ Contenu:
             res = client.chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.1,  # Plus bas pour plus de fidélité au texte original
-                timeout=60,  # Timeout de 60 secondes pour éviter les worker timeouts
-                max_tokens=8000,  # Limiter pour accélérer (suffisant pour la plupart des PDFs)
+                timeout=110,  # Timeout de 110 secondes (marge avant worker timeout à 120s)
+                max_tokens=10000,  # Augmenté pour PDFs complexes
                 # gpt-4o-mini est très économique: ~$0.15/$0.60 par 1M tokens (entrée/sortie)
                 messages=[
                     {"role": "system", "content": sys},
@@ -3750,13 +3756,8 @@ Contenu:
             )
         except Exception as e:
             print(f"❌ Erreur OpenAI API: {e}")
-            # Retourner une structure minimale en cas d'erreur
-            return {
-                "title": "Erreur lors de l'import",
-                "introduction": f"Une erreur est survenue lors du traitement du PDF: {str(e)}",
-                "sections": [],
-                "cta": {"title":"Réservez maintenant","description":"","buttonText":"Réserver"}
-            }
+            # Ne PAS retourner de structure - lever l'exception pour éviter de sauvegarder un document vide
+            raise Exception(f"Échec du traitement OpenAI: {str(e)}")
         raw = res.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```json")[-1].split("```")[0]
