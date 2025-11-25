@@ -1730,9 +1730,10 @@ ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
     def _extract_images_from_url(self, url):
         """
         Extrait les URLs des images depuis une page avec BeautifulSoup.
+        Cherche dans: <img>, <noscript>, attributs data-*, background-image CSS
         """
         try:
-            print(f"   🖼️ Extraction des images avec BeautifulSoup...")
+            print(f"   🖼️ Extraction des images avec BeautifulSoup (mode amélioré)...")
             images = []
             
             headers = {
@@ -1742,31 +1743,82 @@ ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
-                img_tags = soup.find_all('img')
+                from urllib.parse import urljoin
+                import re
                 
+                # 1. Images classiques <img>
+                img_tags = soup.find_all('img')
                 for img in img_tags:
-                    src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                    # Chercher dans tous les attributs data-* possibles
+                    src = (img.get('src') or 
+                           img.get('data-src') or 
+                           img.get('data-lazy-src') or
+                           img.get('data-original') or
+                           img.get('data-srcset') or
+                           img.get('data-image') or
+                           img.get('data-img') or
+                           img.get('data-url'))
+                    
                     if src:
-                        # Convertir les URLs relatives en absolues
-                        if src.startswith('//'):
-                            src = 'https:' + src
-                        elif src.startswith('/'):
-                            from urllib.parse import urljoin
-                            src = urljoin(url, src)
-                        elif not src.startswith('http'):
-                            from urllib.parse import urljoin
-                            src = urljoin(url, src)
+                        # Si c'est un srcset, prendre la première URL
+                        if ' ' in str(src):
+                            src = str(src).split(' ')[0].split(',')[0]
                         
-                        # Filtrer les images trop petites et de tracking
-                        if any(skip in src.lower() for skip in ['pixel', 'tracking', 'analytics', 'beacon', 'logo', 'icon', '1x1']):
+                        images.append(str(src))
+                
+                # 2. Images dans <noscript> (fallback pour sites JavaScript)
+                noscript_tags = soup.find_all('noscript')
+                for noscript in noscript_tags:
+                    noscript_soup = BeautifulSoup(str(noscript), 'html.parser')
+                    for img in noscript_soup.find_all('img'):
+                        src = img.get('src')
+                        if src:
+                            images.append(src)
+                
+                # 3. Background images dans style=""
+                elements_with_style = soup.find_all(style=True)
+                for element in elements_with_style:
+                    style = element.get('style', '')
+                    bg_images = re.findall(r'background-image:\s*url\(["\']?([^"\')]+)["\']?\)', style)
+                    images.extend(bg_images)
+                
+                # 4. Normaliser toutes les URLs
+                normalized_images = []
+                for src in images:
+                    if not src or len(src) < 5:
+                        continue
+                    
+                    # Convertir les URLs relatives en absolues
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        src = urljoin(url, src)
+                    elif not src.startswith('http'):
+                        src = urljoin(url, src)
+                    
+                    # Filtrer les images trop petites et de tracking
+                    if any(skip in src.lower() for skip in ['pixel', 'tracking', 'analytics', 'beacon', 'logo', 'icon', '1x1', 'favicon']):
+                        continue
+                    
+                    # Filtrer les images trop petites par dimensions dans l'URL
+                    if re.search(r'[/_-](\d+)x(\d+)[._-]', src):
+                        match = re.search(r'[/_-](\d+)x(\d+)[._-]', src)
+                        width, height = int(match.group(1)), int(match.group(2))
+                        if width < 200 or height < 200:
                             continue
-                        
-                        images.append(src)
+                    
+                    normalized_images.append(src)
             
-            # Limiter à 10 images et dédoublonner
-            unique_images = list(dict.fromkeys(images))[:10]
-            print(f"   ✅ {len(unique_images)} image(s) extraite(s)")
-            return unique_images
+                # Limiter à 10 images et dédoublonner
+                unique_images = list(dict.fromkeys(normalized_images))[:10]
+                
+                if unique_images:
+                    print(f"   ✅ {len(unique_images)} image(s) extraite(s) (img: {len(img_tags)}, noscript: {len(noscript_tags)}, style: {len(elements_with_style)})")
+                else:
+                    print(f"   ⚠️ Aucune image trouvée (img: {len(img_tags)}, noscript: {len(noscript_tags)}, style: {len(elements_with_style)})")
+                    print(f"   💡 Ce site nécessite probablement JavaScript (Playwright) ou une API d'images (Unsplash)")
+                
+                return unique_images
             
         except Exception as e:
             print(f"   ⚠️ Erreur extraction images BeautifulSoup: {str(e)}")

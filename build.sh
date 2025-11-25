@@ -9,6 +9,10 @@ echo "🚀 Début du build pour Render..."
 echo "📦 Installation des dépendances Python..."
 pip install -r requirements.txt
 
+# Installer les navigateurs Playwright pour le scraping de sites JavaScript
+echo "🎭 Installation des navigateurs Playwright..."
+playwright install chromium --with-deps || echo "⚠️ Playwright installation partielle - continuons quand même"
+
 # WeasyPrint est utilisé pour la génération PDF professionnelle
 # C'est la solution standard pour Django en production (pas de binaire Chromium requis)
 echo "✅ WeasyPrint configuré pour la génération PDF"
