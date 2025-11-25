@@ -43,56 +43,10 @@ import io
 import fitz  # PyMuPDF
 import traceback
 from .models import Document, DocumentAsset, Folder
-import threading
-import uuid
-from typing import Dict, Any
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
-# ========== SYSTÈME DE JOBS ASYNCHRONES ==========
-# Stockage en mémoire des jobs (simple et efficace pour Render)
-PDF_JOBS: Dict[str, Dict[str, Any]] = {}
-PDF_JOBS_LOCK = threading.Lock()
-
-def get_job_status(job_id: str) -> Dict[str, Any]:
-    """Récupère le statut d'un job"""
-    with PDF_JOBS_LOCK:
-        return PDF_JOBS.get(job_id, {"status": "not_found"})
-
-def update_job_status(job_id: str, status: str, data: Dict[str, Any] = None):
-    """Met à jour le statut d'un job"""
-    with PDF_JOBS_LOCK:
-        if job_id not in PDF_JOBS:
-            PDF_JOBS[job_id] = {}
-        PDF_JOBS[job_id]["status"] = status
-        PDF_JOBS[job_id]["updated_at"] = datetime.now().isoformat()
-        if data:
-            PDF_JOBS[job_id].update(data)
-
-def cleanup_old_jobs():
-    """Nettoie les vieux jobs (>5 min pour économiser la RAM)"""
-    with PDF_JOBS_LOCK:
-        now = datetime.now()
-        to_delete = []
-        for job_id, job in PDF_JOBS.items():
-            if "updated_at" in job:
-                try:
-                    updated = datetime.fromisoformat(job["updated_at"])
-                    if (now - updated).seconds > 300:  # 5 minutes max (économie RAM)
-                        to_delete.append(job_id)
-                except:
-                    pass
-        for job_id in to_delete:
-            del PDF_JOBS[job_id]
-            print(f"🗑️ Job {job_id} supprimé (nettoyage mémoire)")
-
-def delete_job(job_id: str):
-    """Supprime un job immédiatement (économie RAM)"""
-    with PDF_JOBS_LOCK:
-        if job_id in PDF_JOBS:
-            del PDF_JOBS[job_id]
-            print(f"🗑️ Job {job_id} supprimé immédiatement")
-# ================================================
+# Imports pour OpenAI
 
 
 class APIRootView(APIView):
@@ -3525,111 +3479,47 @@ class PdfToGJSEndpoint(APIView):
         logo_data_url = request.data.get("logo_data_url") or ""
         background_url = request.data.get("background_url") or ""
 
-        # Créer un job_id unique
-        job_id = str(uuid.uuid4())
-        
-        # Lire le PDF en mémoire (nécessaire car le fichier request sera fermé)
-        pdf_content = pdf.read()
-        pdf_name = pdf.name
-        
-        # Initialiser le job
-        update_job_status(job_id, "processing", {
-            "progress": 0,
-            "message": "Extraction du contenu PDF en cours..."
-        })
-        
-        # Lancer le traitement en arrière-plan
-        def process_pdf():
+        try:
+            text_md, assets = self._extract_pdf_content(pdf)
+            offer_structure = self._md_to_offer_json(text_md, company_info, assets)
+            
+            # Vérifier que le contenu est valide
+            if not offer_structure or not offer_structure.get('sections') or len(offer_structure.get('sections', [])) == 0:
+                raise Exception("Aucun contenu structuré n'a pu être extrait du PDF")
+
+            # Sauvegarder automatiquement le document importé
             try:
-                # Simuler un fichier pour _extract_pdf_content
-                pdf_file = io.BytesIO(pdf_content)
-                pdf_file.name = pdf_name
+                document = Document.objects.create(
+                    title=offer_structure.get('title', 'PDF Importé'),
+                    description=f"Document importé le {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
+                    document_type='pdf_import',
+                    offer_structure=offer_structure,
+                    company_info=company_info,
+                    assets=assets
+                )
                 
-                update_job_status(job_id, "processing", {
-                    "progress": 20,
-                    "message": "Extraction des images et du texte..."
-                })
+                # Sauvegarder le fichier PDF original
+                pdf.seek(0)  # Reset file pointer
+                pdf_file_content = ContentFile(pdf.read(), name=f"imported_{document.id}.pdf")
+                document.pdf_file.save(f"imported_{document.id}.pdf", pdf_file_content)
                 
-                text_md, assets = self._extract_pdf_content(pdf_file)
-                
-                update_job_status(job_id, "processing", {
-                    "progress": 50,
-                    "message": "Structuration du contenu avec IA..."
-                })
-                
-                offer_structure = self._md_to_offer_json(text_md, company_info, assets)
-                
-                # Vérifier que le contenu est valide avant de sauvegarder
-                if not offer_structure or not offer_structure.get('sections') or len(offer_structure.get('sections', [])) == 0:
-                    raise Exception("Aucun contenu structuré n'a pu être extrait du PDF")
-                
-                update_job_status(job_id, "processing", {
-                    "progress": 80,
-                    "message": "Sauvegarde du document..."
-                })
-
-                # Sauvegarder automatiquement le document importé
-                document_id = None
-                try:
-                    document = Document.objects.create(
-                        title=offer_structure.get('title', 'PDF Importé'),
-                        description=f"Document importé le {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
-                        document_type='pdf_import',
-                        offer_structure=offer_structure,
-                        company_info=company_info,
-                        assets=assets
-                    )
-                    
-                    # Sauvegarder le fichier PDF original
-                    pdf_file_content = ContentFile(pdf_content, name=f"imported_{document.id}.pdf")
-                    document.pdf_file.save(f"imported_{document.id}.pdf", pdf_file_content)
-                    
-                    document_id = document.id
-                    print(f"✅ Document automatiquement sauvegardé avec l'ID: {document.id}")
-                    
-                except Exception as e:
-                    print(f"⚠️ Erreur sauvegarde automatique: {e}")
-
-                # Job terminé avec succès
-                # IMPORTANT: Ne PAS stocker les assets ici (trop gros en RAM)
-                # Le frontend chargera le document via l'API documents/
-                update_job_status(job_id, "completed", {
-                    "progress": 100,
-                    "message": "Import terminé avec succès!",
-                    "result": {
-                        "offer_structure": offer_structure,
-                        "assets": assets,  # Gardé pour compatibilité mais peut être gros
-                        "company_info": company_info,
-                        "background_url": background_url,
-                        "logo_data_url": logo_data_url,
-                        "document_id": document_id
-                    }
-                })
-                print(f"💾 Job {job_id} terminé - Document ID: {document_id}")
+                print(f"✅ Document automatiquement sauvegardé avec l'ID: {document.id}")
                 
             except Exception as e:
-                import traceback
-                error_trace = traceback.format_exc()
-                print(f"❌ Erreur traitement PDF job {job_id}: {error_trace}")
-                update_job_status(job_id, "error", {
-                    "progress": 0,
-                    "message": f"Erreur: {str(e)}",
-                    "error": str(e)
-                })
-        
-        # Lancer le thread
-        thread = threading.Thread(target=process_pdf, daemon=True)
-        thread.start()
-        
-        # Nettoyer les vieux jobs
-        cleanup_old_jobs()
-        
-        # Retourner immédiatement le job_id
-        return Response({
-            "job_id": job_id,
-            "status": "processing",
-            "message": "Import PDF en cours de traitement..."
-        })
+                print(f"⚠️ Erreur sauvegarde automatique: {e}")
+                # Ne pas faire échouer l'import si la sauvegarde échoue
+
+            return Response({
+                "offer_structure": offer_structure,
+                "assets": assets,
+                "company_info": company_info,
+                "background_url": background_url,
+                "logo_data_url": logo_data_url,
+                "document_id": document.id if 'document' in locals() else None
+            })
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"error": f"Erreur import PDF: {e}"}, status=500)
 
     def _extract_pdf_content(self, pdf_file):
         """Retourne (markdown_consolide, assets_base64[])"""
@@ -3852,31 +3742,6 @@ Contenu:
             print(f"✅ Enrichissement terminé - images intégrées dans les sections")
 
         return data
-
-
-class PdfJobStatusEndpoint(APIView):
-    """
-    GET /api/pdf-job-status/<job_id>/
-    Retourne le statut d'un job de traitement PDF
-    """
-    permission_classes = [AllowAny]
-    
-    def get(self, request, job_id):
-        job_data = get_job_status(job_id)
-        
-        if job_data.get("status") == "not_found":
-            return Response({
-                "error": "Job non trouvé",
-                "job_id": job_id
-            }, status=404)
-        
-        # Si le job est terminé (completed ou error), le supprimer après lecture
-        # pour libérer la RAM immédiatement
-        if job_data.get("status") in ["completed", "error"]:
-            delete_job(job_id)
-            print(f"✅ Job {job_id} supprimé après lecture (économie RAM)")
-        
-        return Response(job_data)
 
 
 class ImproveOfferEndpoint(APIView):
