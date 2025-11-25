@@ -3600,77 +3600,24 @@ class PdfToGJSEndpoint(APIView):
 
     def _md_to_offer_json(self, markdown_text, company_info, assets=[]):
         """Demande à l'IA de mapper le texte → JSON sections normalisées."""
-        sys = """Tu es un assistant qui structure des offres de voyage. Réponds en JSON strict.
-
-⚠️ RÈGLE ABSOLUE: TU DOIS CONSERVER 100% DU TEXTE ORIGINAL DU PDF.
-- Ne coupe RIEN. Ne supprime AUCUNE information.
-- Garde TOUTES les journées du programme jour par jour (Jour 1, Jour 2, Jour 3, etc.)
-- Garde TOUS les détails horaires (départ, arrivée, heures)
-- Garde TOUTES les descriptions des activités, visites, restaurants
-- Garde TOUS les détails pratiques, conditions, notes
-- Garde TOUTES les listes (inclus, non inclus, à prévoir)
-- Tu peux uniquement reformater en markdown pour améliorer la lisibilité, mais tu ne peux PAS omettre une seule information.
-Ton rôle est uniquement de STRUCTURER et ORGANISER le texte existant, JAMAIS de le résumer ou condenser."""
+        # OPTIMISATION: Ne pas inclure les images dans le prompt OpenAI pour accélérer le traitement
+        # Les images seront ajoutées automatiquement après la génération
         
-        # Préparer la liste des images disponibles avec leurs data URLs
-        images_info = ""
-        if assets:
-            images_info = f"\n🖼️🖼️🖼️ IMAGES DISPONIBLES DEPUIS LE PDF ({len(assets)} images) - UTILISE-LES DANS LES SECTIONS :\n"
-            for i, asset in enumerate(assets):
-                images_info += f"\n--- Image {i+1} ---\n"
-                images_info += f"Nom: {asset['name']}\n"
-                images_info += f"Page: {asset['page']}\n"
-                images_info += f"Dimensions: {asset['width']}x{asset['height']}px\n"
-                images_info += f"Data URL: {asset['data_url'][:100]}...\n"
-                images_info += f"Index pour référence: {i}\n"
-            images_info += "\n🚨🚨🚨 CRITIQUE - ASSOCIATION DES IMAGES AUX SECTIONS :\n"
-            images_info += "- Associe intelligemment les images aux sections appropriées selon leur contenu/type\n"
-            images_info += "- Images d'avions/aéroports → section Flights\n"
-            images_info += "- Images d'hôtels/chambres/piscines → section Hotel\n"
-            images_info += "- Images d'activités/paysages → section Activities ou Programme\n"
-            images_info += "- Autres images → section la plus appropriée\n"
-            images_info += "- Si tu ne peux pas déterminer la section, place-les dans une section générale ou dans l'introduction\n"
-            images_info += "- UTILISE les data URLs fournies ci-dessus pour chaque image dans le champ 'images' de la section\n"
-            images_info += "- Format pour images: [{\"url\": \"data_url_complet\", \"alt\": \"description\"}]\n"
+        # Limiter la taille du texte pour éviter les timeouts (max ~50000 caractères = ~12500 tokens)
+        max_chars = 50000
+        if len(markdown_text) > max_chars:
+            print(f"⚠️ PDF très long ({len(markdown_text)} caractères), troncature à {max_chars}")
+            markdown_text = markdown_text[:max_chars] + "\n\n[... PDF tronqué, contenu trop long ...]"
+        
+        sys = """Expert en structuration d'offres de voyage. Réponds en JSON strict.
+RÈGLE: Conserve 100% du texte original. Ne résume JAMAIS, structure uniquement."""
         
         user = f"""
-Voici le contenu d'une offre (Markdown, possible désordre). Déduis les sections:
-- Flights (transport: vols, trajets, horaires, classe)
-- Hotel (hébergement)
-- Price (tarifs, conditions, inclus/exclus)
-- Programme ou Itinéraire (si le PDF contient un programme jour par jour, crée une section dédiée avec TOUTES les journées, aucune exception)
-- Activities (activités, visites, excursions)
-- Transfers (transports locaux)
-- Info (informations pratiques, conditions, notes)
-- CTA (appel à l'action)
-- et autres sections pertinentes selon le contenu
+Structure cette offre en JSON avec: title, introduction, sections[], cta.
+Sections possibles: Flights, Hotel, Price, Programme, Activities, Transfers, Info.
+Format section: {{"id":"slug","type":"...","title":"...","body":"..."}}
 
-{images_info}
-
-Contraintes CRITIQUES:
-- Réponds JSON STRICT sans texte autour.
-- Garde les champs: title (string), introduction (string), sections (array), cta (object).
-- Chaque section: {{"id":"slug","type":"Flights|Hotel|Price|Info|Activities|Programme|Itinéraire|...","title":"...","body":"...","images":[...]}}
-
-⚠️⚠️⚠️ RÈGLE CRITIQUE ABSOLUE POUR LE CHAMP "body": ⚠️⚠️⚠️
-- CONSERVE 100% DU TEXTE ORIGINAL. Ne coupe ABSOLUMENT RIEN.
-- Si le PDF a un programme jour par jour avec 15 journées, tu dois TOUTES les mettre dans le body (Jour 1, Jour 2, ... Jour 15).
-- Si le PDF détaille chaque activité, visite, restaurant, transport, tu dois TOUT garder.
-- Si le PDF a des listes d'inclus/non inclus, conditions, notes, tu dois TOUT garder.
-- Si un texte fait 2000 mots dans le PDF, il doit faire ~2000 mots dans ton body.
-- Si un texte fait 5000 mots dans le PDF, il doit faire ~5000 mots dans ton body.
-- Tu peux UNIQUEMENT reformater en markdown (ajouter des titres ##, listes - , etc.) pour améliorer la lisibilité.
-- Interdiction totale de résumer, condenser, omettre, ou dire "etc." à la place de lister tous les éléments.
-- body en texte enrichi (markdown simple), pas de HTML.
-- IMPORTANT: Si des images sont disponibles (voir section "IMAGES DISPONIBLES DEPUIS LE PDF" ci-dessus), associe-les intelligemment aux sections appropriées :
-  * Images d'avions/aéroports → section Flights
-  * Images d'hôtels/chambres/piscines → section Hotel  
-  * Images d'activités/paysages → section Activities ou Programme
-  * Autres images → section la plus appropriée
-- Pour chaque image associée à une section, ajoute un champ "images" (array) avec les objets image:
-  {{"images": [{{"url": "data_url_complet_de_l_image", "alt": "description de l'image"}}]}}
-- UTILISE les data URLs exactes fournies dans la section "IMAGES DISPONIBLES DEPUIS LE PDF" ci-dessus
-- Place les images dans le champ "images" de chaque section, pas dans le "body"
+CRITIQUE: Conserve TOUT le texte (tous les jours, détails, listes). Reformate en markdown propre.
 
 Contenu:
 {markdown_text}
@@ -3679,9 +3626,8 @@ Contenu:
             res = client.chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.1,  # Plus bas pour plus de fidélité au texte original
-                timeout=90,  # Timeout de 90 secondes pour éviter les worker timeouts
-                # Note: max_tokens non spécifié = utilise la limite par défaut (16384)
-                # Coût réel = tokens générés (output), pas la limite maximale
+                timeout=60,  # Timeout de 60 secondes pour éviter les worker timeouts
+                max_tokens=8000,  # Limiter pour accélérer (suffisant pour la plupart des PDFs)
                 # gpt-4o-mini est très économique: ~$0.15/$0.60 par 1M tokens (entrée/sortie)
                 messages=[
                     {"role": "system", "content": sys},
