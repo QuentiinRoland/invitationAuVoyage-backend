@@ -70,7 +70,7 @@ def update_job_status(job_id: str, status: str, data: Dict[str, Any] = None):
             PDF_JOBS[job_id].update(data)
 
 def cleanup_old_jobs():
-    """Nettoie les vieux jobs (>1h)"""
+    """Nettoie les vieux jobs (>5 min pour économiser la RAM)"""
     with PDF_JOBS_LOCK:
         now = datetime.now()
         to_delete = []
@@ -78,12 +78,20 @@ def cleanup_old_jobs():
             if "updated_at" in job:
                 try:
                     updated = datetime.fromisoformat(job["updated_at"])
-                    if (now - updated).seconds > 3600:  # 1 heure
+                    if (now - updated).seconds > 300:  # 5 minutes max (économie RAM)
                         to_delete.append(job_id)
                 except:
                     pass
         for job_id in to_delete:
             del PDF_JOBS[job_id]
+            print(f"🗑️ Job {job_id} supprimé (nettoyage mémoire)")
+
+def delete_job(job_id: str):
+    """Supprime un job immédiatement (économie RAM)"""
+    with PDF_JOBS_LOCK:
+        if job_id in PDF_JOBS:
+            del PDF_JOBS[job_id]
+            print(f"🗑️ Job {job_id} supprimé immédiatement")
 # ================================================
 
 
@@ -3579,18 +3587,21 @@ class PdfToGJSEndpoint(APIView):
                     print(f"⚠️ Erreur sauvegarde automatique: {e}")
 
                 # Job terminé avec succès
+                # IMPORTANT: Ne PAS stocker les assets ici (trop gros en RAM)
+                # Le frontend chargera le document via l'API documents/
                 update_job_status(job_id, "completed", {
                     "progress": 100,
                     "message": "Import terminé avec succès!",
                     "result": {
                         "offer_structure": offer_structure,
-                        "assets": assets,
+                        "assets": assets,  # Gardé pour compatibilité mais peut être gros
                         "company_info": company_info,
                         "background_url": background_url,
                         "logo_data_url": logo_data_url,
                         "document_id": document_id
                     }
                 })
+                print(f"💾 Job {job_id} terminé - Document ID: {document_id}")
                 
             except Exception as e:
                 import traceback
@@ -3671,8 +3682,9 @@ class PdfToGJSEndpoint(APIView):
                             pix = None
                         continue
                     
-                    # Vérifier que l'image n'est pas trop grande (limite à 2MB)
-                    if len(img_bytes) > 2 * 1024 * 1024:
+                    # Vérifier que l'image n'est pas trop grande (limite à 500KB pour économie RAM)
+                    if len(img_bytes) > 512 * 1024:  # 500KB max par image
+                        print(f"⚠️ Image trop grande ({len(img_bytes)/1024:.0f}KB) - ignorée")
                         continue
                     
                     b64 = base64.b64encode(img_bytes).decode("ascii")
@@ -3856,6 +3868,12 @@ class PdfJobStatusEndpoint(APIView):
                 "error": "Job non trouvé",
                 "job_id": job_id
             }, status=404)
+        
+        # Si le job est terminé (completed ou error), le supprimer après lecture
+        # pour libérer la RAM immédiatement
+        if job_data.get("status") in ["completed", "error"]:
+            delete_job(job_id)
+            print(f"✅ Job {job_id} supprimé après lecture (économie RAM)")
         
         return Response(job_data)
 

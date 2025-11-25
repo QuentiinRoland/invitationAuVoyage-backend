@@ -5,7 +5,7 @@ import os
 
 # Configuration de base
 bind = f"0.0.0.0:{os.getenv('PORT', '8000')}"
-workers = 2  # Render Free tier a des limites de RAM
+workers = 1  # Render Free tier: 1 worker pour maximiser la RAM disponible (512MB total)
 worker_class = "sync"
 worker_connections = 1000
 timeout = 120  # Timeout plus long pour les tâches lourdes (génération PDF + OpenAI)
