@@ -9,9 +9,8 @@ echo "🚀 Début du build pour Render..."
 echo "📦 Installation des dépendances Python..."
 pip install -r requirements.txt
 
-# Note: Playwright nécessite des droits root sur Render (pas disponible en free tier)
-# Solution recommandée: Configurer UNSPLASH_ACCESS_KEY ou TAVILY_API_KEY dans Environment
-# Ces APIs fonctionnent mieux sur Render et garantissent des images
+# Playwright nécessite droits root sur Render (pas disponible)
+# Solution: Configurer TAVILY_API_KEY (scraping JS + images comme Playwright)
 
 # WeasyPrint est utilisé pour la génération PDF professionnelle
 # C'est la solution standard pour Django en production (pas de binaire Chromium requis)
