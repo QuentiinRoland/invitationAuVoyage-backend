@@ -3539,22 +3539,17 @@ class PdfToGJSEndpoint(APIView):
             if not offer_structure or not offer_structure.get('sections') or len(offer_structure.get('sections', [])) == 0:
                 raise Exception("Aucun contenu structuré n'a pu être extrait du PDF")
 
-            # Sauvegarder automatiquement le document importé (MAX 5 images pour économiser RAM)
+            # Sauvegarder automatiquement le document importé
             try:
-                # Limiter à 5 images pour éviter crash RAM (14 images = 400MB = crash)
-                limited_assets = assets[:5] if len(assets) > 5 else assets
-                if len(assets) > 5:
-                    print(f"⚠️ {len(assets)} images extraites, limitées à 5 pour économie RAM")
-                
                 document = Document.objects.create(
                     title=offer_structure.get('title', 'PDF Importé'),
                     description=f"Document importé le {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
                     document_type='pdf_import',
                     offer_structure=offer_structure,
                     company_info=company_info,
-                    assets=limited_assets  # Max 5 images
+                    assets=assets
                 )
-                print(f"✅ Document sauvegardé avec {len(limited_assets)} image(s)")
+                print(f"✅ Document sauvegardé avec {len(assets)} image(s)")
                 
                 # Sauvegarder le fichier PDF original
                 pdf.seek(0)  # Reset file pointer
@@ -3634,8 +3629,8 @@ class PdfToGJSEndpoint(APIView):
                             pix = None
                         continue
                     
-                    # Vérifier que l'image n'est pas trop grande (limite à 1MB pour économie RAM)
-                    if len(img_bytes) > 1024 * 1024:  # 1MB max par image
+                    # Vérifier que l'image n'est pas trop grande (limite à 3MB pour économie RAM)
+                    if len(img_bytes) > 3 * 1024 * 1024:  # 3MB max par image
                         print(f"⚠️ Image trop grande ({len(img_bytes)/1024:.0f}KB) - ignorée")
                         if pix:
                             pix = None
