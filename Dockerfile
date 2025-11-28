@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y \
     libglu1-mesa \
     && rm -rf /var/lib/apt/lists/*
 
+# Créer un utilisateur non-root pour gunicorn (Railway essaie de l'utiliser)
+RUN useradd -m -u 1000 invitationauvoyage || true
+
 # Dossier de travail
 WORKDIR /app
 
