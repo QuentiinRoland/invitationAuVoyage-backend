@@ -27,11 +27,22 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-dev-key-change-in-producti
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
-# Render deployment configuration
+# Deployment configuration (Render, Railway, etc.)
 RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-if RENDER_EXTERNAL_HOSTNAME:
+RAILWAY_ENVIRONMENT = os.getenv('RAILWAY_ENVIRONMENT')
+ALLOWED_HOSTS_ENV = os.getenv('ALLOWED_HOSTS', '')
+
+if ALLOWED_HOSTS_ENV:
+    # Si ALLOWED_HOSTS est défini explicitement, l'utiliser
+    ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_ENV.split(',')]
+elif RAILWAY_ENVIRONMENT:
+    # Déploiement Railway - accepter tous les domaines .railway.app
+    ALLOWED_HOSTS = ['.railway.app', 'localhost', '127.0.0.1']
+elif RENDER_EXTERNAL_HOSTNAME:
+    # Déploiement Render
     ALLOWED_HOSTS = [RENDER_EXTERNAL_HOSTNAME, 'localhost', '127.0.0.1']
 else:
+    # Développement local
     ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 # OpenAI API Key
