@@ -14,5 +14,7 @@ exec gunicorn config.wsgi:application \
     --timeout 120 \
     --log-level info \
     --access-logfile - \
-    --error-logfile -
+    --error-logfile - \
+    --user root \
+    --group root
 
