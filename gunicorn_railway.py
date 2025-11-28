@@ -1,6 +1,6 @@
 """
 Gunicorn configuration for Railway deployment
-EXPLICITLY OVERRIDING CONFLICTING VARIABLES
+EXPLICITLY OVERRIDING CONFLICTING VARIABLES WITH DUMMY FUNCTIONS
 """
 import os
 
@@ -20,22 +20,26 @@ accesslog = '-'
 errorlog = '-'
 loglevel = 'debug'
 
-# CRITICAL: EXPLICITLY SET HOOKS TO None
-on_starting = None
-on_reload = None
-when_ready = None
-pre_fork = None
-post_fork = None
-post_worker_init = None
-worker_int = None
-worker_abort = None
-pre_exec = None
-pre_request = None
-post_request = None
-child_exit = None
-worker_exit = None
-nworkers_changed = None
-on_exit = None
+# CRITICAL: Define a dummy function to satisfy Gunicorn callable requirement
+def dummy_hook(*args, **kwargs):
+    pass
+
+# Override all hooks with the dummy function
+on_starting = dummy_hook
+on_reload = dummy_hook
+when_ready = dummy_hook
+pre_fork = dummy_hook
+post_fork = dummy_hook
+post_worker_init = dummy_hook
+worker_int = dummy_hook
+worker_abort = dummy_hook
+pre_exec = dummy_hook
+pre_request = dummy_hook
+post_request = dummy_hook
+child_exit = dummy_hook
+worker_exit = dummy_hook
+nworkers_changed = dummy_hook
+on_exit = dummy_hook
 
 # Server mechanics
 daemon = False
