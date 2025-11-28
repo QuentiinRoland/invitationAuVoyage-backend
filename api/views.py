@@ -50,6 +50,8 @@ def get_openai_client():
     api_key = settings.OPENAI_API_KEY
     if not api_key:
         raise ValueError("OPENAI_API_KEY n'est pas configurée dans les variables d'environnement")
+    masked = f"{api_key[:5]}...{api_key[-4:]}"
+    print(f"🕵️ API VIEW RUNTIME KEY: {masked}")
     return OpenAI(api_key=api_key)
 
 # Imports pour OpenAI
