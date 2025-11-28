@@ -1,14 +1,9 @@
 #!/bin/bash
 set -e
-
+set -x
 echo "🔧 Running migrations..."
-python manage.py migrate
-
+python manage.py migrate --no-input
 echo "👤 Creating superuser..."
-python create_superuser.py || echo "⚠️ Superuser creation failed, continuing..."
-
-echo "🚀 Starting Gunicorn..."
-echo "📡 Port détecté: ${PORT:-8080}"
-
-# Use our own config file to override any Railway-injected settings
-exec gunicorn config.wsgi:application --config gunicorn_railway.py
+python create_superuser.py || true
+echo "🚀 Starting Gunicorn (NUCLEAR OPTION)..."
+exec gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8080}" --workers 2 --worker-class sync --log-level debug --access-logfile - --error-logfile - --timeout 120 --forwarded-allow-ips '*'

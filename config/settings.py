@@ -329,3 +329,6 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3002')
 # En développement, utiliser le backend console pour les emails
 if DEBUG and not EMAIL_HOST_USER:
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# FORCE OVERRIDE FOR DEBUGGING
+ALLOWED_HOSTS = ['*']
+print("🛑 DEBUG: ALLOWED_HOSTS forcé à ['*']")
