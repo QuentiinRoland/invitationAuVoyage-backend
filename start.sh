@@ -4,6 +4,13 @@ set -x
 
 echo "🚀 STARTING APP SCRIPT..."
 
+# DEBUG: Vérifier si la variable existe dans le shell
+if [ -z "$OPENAI_API_KEY" ]; then
+    echo "❌ SHELL: OPENAI_API_KEY est VIDE ou INEXISTANTE"
+else
+    echo "✅ SHELL: OPENAI_API_KEY trouvée (commence par ${OPENAI_API_KEY:0:5}...)"
+fi
+
 # NETTOYAGE AU CAS OÙ
 unset WORKER_INT
 unset WORKER_ABORT
