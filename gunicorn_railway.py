@@ -1,44 +1,29 @@
 """Gunicorn configuration for Railway deployment"""
-import multiprocessing
 import os
 
-# Server socket
-bind = f"0.0.0.0:{os.getenv('PORT', '8000')}"
-backlog = 2048
+# CRUCIAL: Railway injecte le port via la variable PORT
+port = os.environ.get('PORT', '8080')
+bind = f"0.0.0.0:{port}"
 
-# Worker processes
+# Configuration minimale
 workers = 2
 worker_class = 'sync'
-worker_connections = 1000
 timeout = 120
 keepalive = 5
 
-# Logging
+# Logging pour debug
 accesslog = '-'
 errorlog = '-'
-loglevel = 'debug'  # Plus de logs pour debug
-capture_output = True  # Capture stdout/stderr des workers
-access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
+loglevel = 'info'
+capture_output = True
 
-# Preload app to see errors during Django import
-preload_app = True
-
-# Process naming
-proc_name = 'invitationauvoyage'
-
-# Server mechanics
-daemon = False
-pidfile = None
-umask = 0
-user = None
-group = None
-tmp_upload_dir = None
-
-# Proxy configuration for Railway (accept forwarded headers from Railway's proxy)
+# Configuration Railway
 forwarded_allow_ips = '*'
-proxy_allow_from = '*'
+secure_scheme_headers = {
+    'X-FORWARDED-PROTOCOL': 'ssl',
+    'X-FORWARDED-PROTO': 'https',
+    'X-FORWARDED-SSL': 'on'
+}
 
-# SSL (not used but prevents errors)
-keyfile = None
-certfile = None
-
+# Afficher le port au démarrage
+print(f"🔌 Gunicorn configuré pour écouter sur 0.0.0.0:{port}")
