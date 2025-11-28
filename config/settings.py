@@ -332,3 +332,10 @@ if DEBUG and not EMAIL_HOST_USER:
 # FORCE OVERRIDE FOR DEBUGGING
 ALLOWED_HOSTS = ['*']
 print("🛑 DEBUG: ALLOWED_HOSTS forcé à ['*']")
+
+# DEBUG OPENAI KEY
+if OPENAI_API_KEY:
+    masked_key = f"{OPENAI_API_KEY[:8]}...{OPENAI_API_KEY[-4:]}"
+    print(f"🔑 DEBUG: OpenAI API Key loaded: {masked_key}")
+else:
+    print("❌ DEBUG: OpenAI API Key NOT FOUND")
