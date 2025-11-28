@@ -36,8 +36,8 @@ if ALLOWED_HOSTS_ENV:
     # Si ALLOWED_HOSTS est défini explicitement, l'utiliser
     ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_ENV.split(',')]
 elif RAILWAY_ENVIRONMENT:
-    # Déploiement Railway - accepter tous les domaines .railway.app
-    ALLOWED_HOSTS = ['.railway.app', 'localhost', '127.0.0.1']
+    # Déploiement Railway - accepter TOUS les domaines pour debug
+    ALLOWED_HOSTS = ['*']
 elif RENDER_EXTERNAL_HOSTNAME:
     # Déploiement Render
     ALLOWED_HOSTS = [RENDER_EXTERNAL_HOSTNAME, 'localhost', '127.0.0.1']
