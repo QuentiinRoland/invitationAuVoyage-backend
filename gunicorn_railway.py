@@ -1,6 +1,6 @@
 """
 Gunicorn configuration for Railway deployment
-EXPLICITLY OVERRIDING CONFLICTING VARIABLES WITH DUMMY FUNCTIONS
+Targeted overrides for conflicting environment variables
 """
 import os
 
@@ -20,26 +20,19 @@ accesslog = '-'
 errorlog = '-'
 loglevel = 'debug'
 
-# CRITICAL: Define a dummy function to satisfy Gunicorn callable requirement
-def dummy_hook(*args, **kwargs):
+# CRITICAL FIX: Only override the hooks that conflict with Railway Env Vars
+# Railway seems to inject WORKER_INT="INT", causing Gunicorn to crash.
+# We define a dummy function with correct signature (arity 1) to override it.
+
+def dummy_worker_hook(worker):
     pass
 
-# Override all hooks with the dummy function
-on_starting = dummy_hook
-on_reload = dummy_hook
-when_ready = dummy_hook
-pre_fork = dummy_hook
-post_fork = dummy_hook
-post_worker_init = dummy_hook
-worker_int = dummy_hook
-worker_abort = dummy_hook
-pre_exec = dummy_hook
-pre_request = dummy_hook
-post_request = dummy_hook
-child_exit = dummy_hook
-worker_exit = dummy_hook
-nworkers_changed = dummy_hook
-on_exit = dummy_hook
+# Only override these specific hooks causing issues
+worker_int = dummy_worker_hook
+worker_abort = dummy_worker_hook
+
+# We leave other hooks (on_starting, on_reload, etc.) undefined
+# so Gunicorn uses its defaults and doesn't complain about signatures.
 
 # Server mechanics
 daemon = False
