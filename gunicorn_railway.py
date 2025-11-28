@@ -31,6 +31,10 @@ user = None
 group = None
 tmp_upload_dir = None
 
+# Proxy configuration for Railway (accept forwarded headers from Railway's proxy)
+forwarded_allow_ips = '*'
+proxy_allow_from = '*'
+
 # SSL (not used but prevents errors)
 keyfile = None
 certfile = None
