@@ -44,7 +44,13 @@ import fitz  # PyMuPDF
 import traceback
 from .models import Document, DocumentAsset, Folder
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+# Client OpenAI initialisé de manière lazy (au moment de l'utilisation)
+def get_openai_client():
+    """Retourne une instance du client OpenAI avec la clé API"""
+    api_key = settings.OPENAI_API_KEY
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY n'est pas configurée dans les variables d'environnement")
+    return OpenAI(api_key=api_key)
 
 # Imports pour OpenAI
 
@@ -2791,7 +2797,7 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
                 # Par défaut, utiliser circuit
                 prompt = self._get_prompt_circuit(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
             
-            response = client.chat.completions.create(
+            response = get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "Expert voyage. JSON uniquement."},
@@ -3686,7 +3692,7 @@ Contenu:
 {markdown_text}
         """
         try:
-            res = client.chat.completions.create(
+            res = get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.1,  # Plus bas pour plus de fidélité au texte original
                 timeout=110,  # Timeout de 110 secondes (marge avant worker timeout à 120s)
@@ -3829,7 +3835,7 @@ JSON:
 {json.dumps(offer, ensure_ascii=False)}
 """
 
-        res = client.chat.completions.create(
+        res = get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.5,
             timeout=90,  # Timeout de 90 secondes pour éviter les worker timeouts
