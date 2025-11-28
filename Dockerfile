@@ -45,9 +45,12 @@ COPY . .
 # Collecter les fichiers statiques (sans interaction)
 RUN SECRET_KEY=temp python manage.py collectstatic --no-input --clear
 
+# Rendre le script de démarrage exécutable
+RUN chmod +x start.sh
+
 # Port exposé
 EXPOSE 8000
 
 # Commande de démarrage
-CMD python manage.py migrate && (python create_superuser.py || true) && gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120
+CMD ["./start.sh"]
 
