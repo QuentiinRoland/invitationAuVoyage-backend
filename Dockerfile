@@ -51,6 +51,9 @@ RUN SECRET_KEY=temp python manage.py collectstatic --no-input --clear
 # Rendre le script de démarrage exécutable
 RUN chmod +x start.sh
 
+# Donner les permissions à l'utilisateur invitationauvoyage
+RUN chown -R invitationauvoyage:invitationauvoyage /app
+
 # Port exposé
 EXPOSE 8000
 
