@@ -8,13 +8,14 @@ echo "👤 Creating superuser..."
 python create_superuser.py || echo "⚠️ Superuser creation failed, continuing..."
 
 echo "🚀 Starting Gunicorn..."
+# Force gunicorn to NOT switch users at all
+export USER=root
+export USERNAME=root
 exec gunicorn config.wsgi:application \
     --bind 0.0.0.0:${PORT:-8000} \
     --workers 2 \
     --timeout 120 \
     --log-level info \
     --access-logfile - \
-    --error-logfile - \
-    --user root \
-    --group root
+    --error-logfile -
 
