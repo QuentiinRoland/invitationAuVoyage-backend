@@ -23,13 +23,29 @@ class DocumentListCreateView(ListCreateAPIView):
         if self.request.user.is_authenticated:
             return Document.objects.filter(owner=self.request.user).order_by('-updated_at')
         return Document.objects.all().order_by('-updated_at')
+    
+    def create(self, request, *args, **kwargs):
+        """Override pour logger les erreurs de validation"""
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            print("❌ VALIDATION FAILED:")
+            print("Errors:", serializer.errors)
+            print("Data:", request.data.keys() if hasattr(request.data, 'keys') else 'Not a dict')
+        return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         """Associer le document à l'utilisateur connecté si authentifié"""
-        if self.request.user.is_authenticated:
-            serializer.save(owner=self.request.user)
-        else:
-            serializer.save()  # Sans owner si pas connecté
+        try:
+            if self.request.user.is_authenticated:
+                serializer.save(owner=self.request.user)
+            else:
+                serializer.save()  # Sans owner si pas connecté
+        except Exception as e:
+            import traceback
+            print("❌ ERREUR PERFORM_CREATE:")
+            print(traceback.format_exc())
+            print("Data reçue:", self.request.data)
+            raise
 
 
 class DocumentDetailView(RetrieveUpdateDestroyAPIView):

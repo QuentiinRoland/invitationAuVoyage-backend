@@ -124,6 +124,9 @@ class DocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ('owner', 'created_at', 'updated_at')
 
     def create(self, validated_data):
-        """Créer un document en associant l'utilisateur connecté"""
-        validated_data['owner'] = self.context['request'].user
+        """Créer un document en associant l'utilisateur connecté si authentifié"""
+        user = self.context['request'].user
+        if user.is_authenticated:
+            validated_data['owner'] = user
+        # Si pas authentifié, owner reste None (permis par le modèle)
         return super().create(validated_data)

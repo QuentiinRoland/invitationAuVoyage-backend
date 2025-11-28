@@ -64,6 +64,7 @@ class Document(models.Model):
     DOCUMENT_TYPES = [
         ('pdf_import', 'PDF Importé'),
         ('grapesjs_project', 'Projet GrapesJS'),
+        ('puck_project', 'Projet Puck'),
         ('generated_offer', 'Offre Générée'),
     ]
     
