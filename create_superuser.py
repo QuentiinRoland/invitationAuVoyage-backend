@@ -37,8 +37,11 @@ if not User.objects.filter(username=username).exists():
     print(f'⚠️  IMPORTANT: Changez le mot de passe après la première connexion!')
 else:
     user = User.objects.get(username=username)
+    # Reset le mot de passe à chaque démarrage si la variable est définie
+    user.set_password(password)
+    user.save()
     token, created = Token.objects.get_or_create(user=user)
-    print(f'ℹ️  Le superuser {username} existe déjà.')
+    print(f'ℹ️  Le superuser {username} existe déjà — mot de passe mis à jour.')
     print(f'   Email: {user.email}')
     print(f'   Token: {token.key} ({"créé" if created else "existant"})')
     print(f'👉 Connexion frontend avec : email={user.email}')
