@@ -22,5 +22,8 @@ python manage.py migrate --no-input
 echo "👤 Creating superuser..."
 python create_superuser.py || true
 
+echo "👥 Creating initial users..."
+python create_initial_users.py || true
+
 echo "🔥 STARTING GUNICORN WITH SAFE CONFIG..."
 exec gunicorn config.wsgi:application -c gunicorn_railway.py
