@@ -9,7 +9,7 @@ from .auth_views import (
 )
 from .document_views import (
     DocumentListCreateView, DocumentDetailView, FolderListCreateView, FolderDetailView,
-    DocumentMoveToFolderView, FolderDocumentsView, DocumentsWithoutFolderView
+    DocumentMoveToFolderView, FolderDocumentsView, DocumentsWithoutFolderView, UploadImageView
 )
 
 urlpatterns = [
@@ -48,6 +48,9 @@ urlpatterns = [
     path("folders/<int:pk>/", FolderDetailView.as_view(), name="folder-detail"),
     path("folders/<int:folder_id>/documents/", FolderDocumentsView.as_view(), name="folder-documents"),
     
+    # Upload d'images (public)
+    path("upload-image/", UploadImageView.as_view(), name="upload-image"),
+
     # Proxy Freepik API (public - pas besoin d'authentification)
     path("freepik/search/", FreepikImageSearchView.as_view(), name="freepik-search"),
 ]

@@ -117,6 +117,7 @@ class DocumentSerializer(serializers.ModelSerializer):
     document_assets = DocumentAssetSerializer(many=True, read_only=True)
     file_size_mb = serializers.ReadOnlyField()
     owner = serializers.StringRelatedField(read_only=True)
+    folder_id = serializers.IntegerField(source='folder.id', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = Document

@@ -19,6 +19,7 @@ import hashlib
 from bs4 import BeautifulSoup
 import pathlib
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Chemin vers le répertoire du projet
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -570,8 +571,8 @@ class TravelOfferGenerator(APIView):
                 'Upgrade-Insecure-Requests': '1',
                 'Referer': 'https://www.google.com/'  # Simuler une arrivée depuis Google
             }
-            print(f"⏱️ Timeout de 20 secondes pour le scraping...")
-            response = requests.get(url, headers=headers, timeout=20, allow_redirects=True, verify=False)
+            print(f"⏱️ Timeout de 8 secondes pour le scraping...")
+            response = requests.get(url, headers=headers, timeout=8, allow_redirects=True, verify=False)
             print(f"📥 Réponse HTTP: {response.status_code}")
             
             if response.status_code != 200:
@@ -651,73 +652,99 @@ class TravelOfferGenerator(APIView):
             print(f"   Traceback: {traceback.format_exc()}")
             return None
     
+    def _scrape_single_url(self, url_clean):
+        """
+        Scrape une seule URL avec la stratégie : BeautifulSoup d'abord (rapide),
+        puis Playwright si nécessaire (lent).
+        Retourne un dict {url, content, images} ou None.
+        """
+        print(f"🌐 Tentative de scraping: {url_clean}")
+
+        js_sites_keywords = ['misterfly', 'booking.com', 'expedia', 'airbnb', 'vrbo', 'hotels.com']
+        is_js_site = any(keyword in url_clean.lower() for keyword in js_sites_keywords)
+
+        desc = None
+
+        # Stratégie inversée : BeautifulSoup d'abord (rapide ~2s), Playwright ensuite (lent ~20s)
+        if not is_js_site:
+            print(f"   📄 Essai rapide avec BeautifulSoup...")
+            desc = self._scrape_website_description(url_clean)
+
+        # Si BS4 échoue ou site JS, essayer Playwright
+        if (not desc or len(desc.strip()) < 50) and PLAYWRIGHT_AVAILABLE:
+            print(f"   🎭 Essai avec Playwright (navigateur headless)...")
+            desc = self._scrape_with_playwright(url_clean)
+
+        # Si Playwright échoue, essayer Tavily
+        if (not desc or len(desc.strip()) < 50) and TAVILY_AVAILABLE:
+            print(f"   🔍 Essai avec Tavily...")
+            desc_tavily = self._scrape_with_tavily(url_clean)
+            if desc_tavily:
+                desc = desc_tavily
+
+        # Dernier recours : BS4 pour les sites JS (au cas où)
+        if (not desc or len(desc.strip()) < 50) and is_js_site:
+            print(f"   📄 Dernier essai avec BeautifulSoup...")
+            desc = self._scrape_website_description(url_clean)
+
+        if desc and len(desc.strip()) > 50:
+            images = []
+            if is_js_site and PLAYWRIGHT_AVAILABLE:
+                images = self._extract_images_with_playwright(url_clean)
+            elif desc:
+                images = self._extract_images_from_url(url_clean)
+
+            print(f"✅ Scraping réussi pour: {url_clean} ({len(desc)} caractères, {len(images)} image(s))")
+            return {
+                "url": url_clean,
+                "content": desc,
+                "images": images[:5] if images else []
+            }
+
+        print(f"❌ Échec du scraping pour: {url_clean} (toutes les méthodes ont échoué)")
+        return None
+
     def _get_website_descriptions(self, urls):
         """
-        Récupère les descriptions de plusieurs sites web.
-        Retourne une liste de descriptions avec statut pour le debugging.
-        Pour les sites JavaScript/Angular/React, utilise Tavily directement.
+        Récupère les descriptions de plusieurs sites web EN PARALLÈLE.
+        Utilise ThreadPoolExecutor pour scraper toutes les URLs simultanément.
         """
         descriptions = []
         failed_urls = []
-        for url in urls:
-            if url and url.strip():
-                url_clean = url.strip()
-                print(f"🌐 Tentative de scraping: {url_clean}")
-                
-                # Détecter si c'est probablement un site JavaScript (misterfly, booking, etc.)
-                js_sites_keywords = ['misterfly', 'booking.com', 'expedia', 'airbnb', 'vrbo', 'hotels.com']
-                is_js_site = any(keyword in url_clean.lower() for keyword in js_sites_keywords)
-                
-                # Stratégie : Essayer Playwright (navigateur headless) en premier pour les sites JS
-                # Si Playwright n'est pas disponible, utiliser Tavily, sinon BeautifulSoup
-                desc = None
-                
-                if is_js_site and PLAYWRIGHT_AVAILABLE:
-                    print(f"   🎭 Site JavaScript détecté, utilisation de Playwright (navigateur headless)...")
-                    desc = self._scrape_with_playwright(url_clean)
-                
-                # Si Playwright échoue ou n'est pas disponible, essayer Tavily
-                if (not desc or len(desc.strip()) < 50) and TAVILY_AVAILABLE:
-                    if desc:
-                        print(f"   ⚠️ Playwright échoué, essai avec Tavily...")
+
+        # Filtrer les URLs valides
+        valid_urls = [url.strip() for url in urls if url and url.strip()]
+
+        if not valid_urls:
+            return descriptions
+
+        print(f"🚀 Scraping parallèle de {len(valid_urls)} URL(s)...")
+
+        # Scraper toutes les URLs en parallèle (max 3 workers)
+        with ThreadPoolExecutor(max_workers=min(3, len(valid_urls))) as executor:
+            future_to_url = {
+                executor.submit(self._scrape_single_url, url): url
+                for url in valid_urls
+            }
+
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    result = future.result()
+                    if result:
+                        descriptions.append(result)
                     else:
-                        print(f"   🔍 Tentative avec Tavily...")
-                    desc_tavily = self._scrape_with_tavily(url_clean)
-                    if desc_tavily:
-                        desc = desc_tavily
-                
-                # Si tout échoue, essayer le scraping classique (pour les sites HTML simples)
-                if not desc or len(desc.strip()) < 50:
-                    if desc:
-                        print(f"   ⚠️ Méthodes avancées échouées, essai avec scraping classique...")
-                    else:
-                        print(f"   📄 Tentative avec scraping classique (BeautifulSoup)...")
-                    desc = self._scrape_website_description(url_clean)
-                
-                if desc and len(desc.strip()) > 50:  # Vérifier que le contenu n'est pas vide
-                    # Extraire aussi les images
-                    images = []
-                    if is_js_site and PLAYWRIGHT_AVAILABLE:
-                        images = self._extract_images_with_playwright(url_clean)
-                    elif desc:  # Si on a du contenu, extraire les images de l'URL
-                        images = self._extract_images_from_url(url_clean)
-                    
-                    descriptions.append({
-                        "url": url_clean,
-                        "content": desc,
-                        "images": images[:5] if images else []  # Limiter à 5 images max
-                    })
-                    if images:
-                        print(f"✅ Scraping réussi pour: {url_clean} ({len(desc)} caractères, {len(images)} image(s) trouvée(s))")
-                    else:
-                        print(f"✅ Scraping réussi pour: {url_clean} ({len(desc)} caractères)")
-                else:
-                    failed_urls.append(url_clean)
-                    print(f"❌ Échec du scraping pour: {url_clean} (toutes les méthodes ont échoué)")
-                    if not TAVILY_AVAILABLE:
-                        print(f"   💡 Astuce: Tavily n'est pas configuré. Pour les sites JavaScript, il est recommandé d'ajouter TAVILY_API_KEY dans .env")
+                        failed_urls.append(url)
+                except Exception as e:
+                    print(f"❌ Exception pour {url}: {e}")
+                    failed_urls.append(url)
+
         if failed_urls:
             print(f"⚠️ {len(failed_urls)} URL(s) n'ont pas pu être scrappées: {', '.join(failed_urls)}")
+            if not TAVILY_AVAILABLE:
+                print(f"   💡 Astuce: Ajoutez TAVILY_API_KEY dans .env pour les sites JavaScript")
+
+        print(f"✅ Scraping terminé: {len(descriptions)}/{len(valid_urls)} URL(s) réussies")
         return descriptions
     
     def _search_flights_with_airfrance_klm(self, origin_code, destination_code, travel_date, return_date=None, search_metadata=None):
@@ -1495,7 +1522,7 @@ class TravelOfferGenerator(APIView):
                 })
                 
                 print(f"   📡 Chargement de la page de recherche...")
-                page.goto(url, wait_until='networkidle', timeout=45000)  # Timeout augmenté
+                page.goto(url, wait_until='networkidle', timeout=20000)
                 
                 # Attendre plus longtemps pour que les résultats se chargent
                 print(f"   ⏱️ Attente du chargement des résultats d'hôtels (8 secondes)...")
@@ -1594,10 +1621,10 @@ ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
                 
                 print(f"   📡 Chargement de la page: {url}")
                 # Attendre que le contenu soit chargé
-                page.goto(url, wait_until='networkidle', timeout=30000)
-                
+                page.goto(url, wait_until='networkidle', timeout=10000)
+
                 # Attendre un peu pour que le JavaScript se charge
-                page.wait_for_timeout(2000)  # 2 secondes supplémentaires
+                page.wait_for_timeout(1000)  # 1 seconde supplémentaire
                 
                 # Extraire le contenu texte
                 print(f"   📄 Extraction du contenu...")
@@ -2011,9 +2038,42 @@ ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
         
         return None, metadata
     
+    def _detect_scraped_prices(self, website_descriptions):
+        """
+        Détecte si le contenu scrapé contient de vraies informations de prix.
+        Retourne (has_prices: bool, price_snippets: list[str])
+        """
+        import re
+        price_patterns = [
+            r'\d+\s*[€$£]',           # 450€, 450 €, 450$
+            r'[€$£]\s*\d+',           # €450
+            r'\d+\s*EUR',             # 450 EUR
+            r'à partir de\s*\d+',     # à partir de 450
+            r'par nuit',              # par nuit
+            r'per night',             # per night
+            r'nuit/personne',
+            r'par personne',
+            r'\d+\s*\/\s*nuit',       # 450/nuit
+            r'tarif\s*:\s*\d+',
+            r'prix\s*:\s*\d+',
+        ]
+        snippets = []
+        for desc in (website_descriptions or []):
+            content = desc.get('content', '').lower()
+            for pattern in price_patterns:
+                matches = re.findall(pattern, content, re.IGNORECASE)
+                if matches:
+                    snippets.extend(matches[:3])
+            if snippets:
+                break
+        return bool(snippets), snippets[:5]
+
     def _get_prompt_circuit(self, text_input, website_descriptions=None, example_templates=None, travel_date=None, return_date=None, real_time_search=None, real_flights_context=None, offer_type="circuit"):
         """Prompt pour un Circuit (plusieurs jours avec itinéraire)"""
-        
+
+        # Détecter si le scraping a trouvé de vrais prix
+        has_scraped_prices, price_snippets = self._detect_scraped_prices(website_descriptions)
+
         # Ajouter les descriptions des sites web si disponibles
         website_context = ""
         has_search_results = False
@@ -2124,56 +2184,58 @@ ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
 🚨🚨🚨 RÈGLES ABSOLUES :
 1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Copie les descriptions du site, ne crée pas tes propres descriptions.
 2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans la section "DATES DU VOYAGE" ci-dessus. N'invente PAS d'autres dates.
-3. Pour les vols : 
-   - Si des VOLS RÉELS ont été fournis ci-dessus (section "VOLS RÉELS TROUVÉS"), utilise-les EXACTEMENT (numéro de vol, compagnie, horaires, aéroports)
-   - Les dates de départ et retour doivent être celles fournies dans "DATES DU VOYAGE", pas d'autres dates
-   - Si AUCUN vol réel n'a été fourni, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs
-4. Pour les transferts : 
-   - Si des informations de transferts ont été trouvées dans les sites web scrapés, utilise-les EXACTEMENT et crée une section "Transferts"
-   - Si AUCUNE information de transfert n'a été trouvée dans les sites scrapés, NE CRÉE PAS de section "Transferts" du tout - omets complètement cette section du JSON
-
-IMPORTANT : Sois TRÈS DÉTAILLÉ dans chaque section. Inclus des informations spécifiques, des prix, des horaires, des descriptions complètes.
+3. Pour les vols :
+   - Si des VOLS RÉELS ont été fournis ci-dessus (section "VOLS RÉELS TROUVÉS"), utilise-les EXACTEMENT.
+   - Si AUCUN vol réel n'a été fourni, n'invente PAS de numéros de vol fictifs.
+4. Pour les transferts :
+   - Si des informations de transferts ont été trouvées dans les sites web scrapés, utilise-les EXACTEMENT.
+   - Si AUCUNE information de transfert n'a été trouvée, NE CRÉE PAS de section "Transferts".
+5. Pour les prix d'hébergement et de séjour :
+{"   - Des prix RÉELS ont été trouvés dans le contenu scrapé : " + str(price_snippets) + ". Utilise UNIQUEMENT ces prix." if has_scraped_prices else "   - AUCUN prix réel n'a été trouvé dans le contenu scrapé."}
+{"   - Utilise les prix tels qu'ils apparaissent dans les données scrapées ci-dessus." if has_scraped_prices else "   - N'INVENTE PAS de prix d'hôtel, de tarif par nuit ou de prix de séjour."}
+{"" if has_scraped_prices else "   - Pour toute mention de prix, écris : 'Prix à confirmer avec l'établissement / l'agence.'"}
+{"" if has_scraped_prices else "   - N'écris PAS de montants en euros (ex: 1 200€, 850€/nuit) si tu ne les as pas dans le contenu scrapé."}
 
 Format JSON strict :
 {{
   "title": "Titre accrocheur et mémorable pour le circuit",
-  "introduction": "Description complète et engageante du circuit (3-4 phrases minimum). IMPORTANT : Si des informations de sites web ont été fournies, utilise-les EXACTEMENT pour cette introduction, pas tes propres descriptions.",
+  "introduction": "Description complète et engageante du circuit (3-4 phrases). Utilise les descriptions des sites web si fournies.",
   "sections": [
     {{
-      "id": "flights", 
-      "type": "Flights", 
-      "title": "Transport Aérien", 
-      "body": "Détails COMPLETS des vols : compagnie, numéros de vol, horaires précis, classe de service, durée du vol, aéroports, bagages inclus, repas à bord, etc. 🚨🚨🚨 SI DES VOLS RÉELS ONT ÉTÉ FOURNIS CI-DESSUS (section VOLS RÉELS TROUVÉS), UTILISE LES EXACTEMENT (numéro de vol, compagnie, horaires, aéroports). Sinon, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs."
+      "id": "flights",
+      "type": "Flights",
+      "title": "Transport Aérien",
+      "body": "Détails des vols issus de la section VOLS RÉELS uniquement. N'invente pas de numéros de vol ni d'horaires."
     }},
     {{
-      "id": "transfers", 
-      "type": "Transfers", 
-      "title": "Transferts & Transport", 
-      "body": "Détails des transferts : type de véhicule, durée, horaires, chauffeur, accueil à l'aéroport, transport local entre les étapes du circuit, etc. 🚨🚨🚨 SI DES INFORMATIONS DE TRANSFERTS ONT ÉTÉ FOURNIES CI-DESSUS (section SITES WEB SCRAPÉS), UTILISE LES EXACTEMENT et crée cette section. SI AUCUNE INFO DE TRANSFERT N'A ÉTÉ TROUVÉE DANS LES SITES SCRAPÉS, NE CRÉE PAS CETTE SECTION DU TOUT - omets-la du JSON."
+      "id": "transfers",
+      "type": "Transfers",
+      "title": "Transferts & Transport",
+      "body": "Transferts trouvés dans les sites web scrapés uniquement. Omets cette section si aucune info de transfert n'est disponible."
     }},
     {{
-      "id": "itinerary", 
-      "type": "Itinéraire", 
-      "title": "Programme du Circuit", 
-      "body": "Itinéraire JOUR PAR JOUR détaillé : Pour chaque jour, indique les visites, activités, excursions, repas inclus, hébergements, horaires précis. Structure : Jour 1 : [détails], Jour 2 : [détails], etc. (minimum 150-200 mots par jour)"
+      "id": "itinerary",
+      "type": "Itinéraire",
+      "title": "Programme du Circuit",
+      "body": "Itinéraire JOUR PAR JOUR basé sur les informations scrapées. Activités, visites, repas inclus, hébergements."
     }},
     {{
-      "id": "hotel", 
-      "type": "Hotel", 
-      "title": "Hébergement", 
-      "body": "Description DÉTAILLÉE des hébergements : nom, catégorie, localisation pour chaque étape du circuit, type de chambre, pension, équipements, services, vue, etc."
+      "id": "hotel",
+      "type": "Hotel",
+      "title": "Hébergement",
+      "body": "{"Nom, catégorie, localisation, équipements et prix des hôtels TELS QUE FOURNIS dans le contenu scrapé." if has_scraped_prices else "Nom, catégorie, localisation et équipements des hôtels si mentionnés dans le contenu scrapé. Pour les prix : écrire 'Prix à confirmer avec l établissement.' Ne pas inventer de tarif par nuit."}"
     }},
     {{
-      "id": "activities", 
-      "type": "Activities", 
-      "title": "Activités & Excursions", 
-      "body": "Programme détaillé : visites guidées, excursions incluses dans le circuit, activités optionnelles, guides, durée, horaires, etc."
+      "id": "activities",
+      "type": "Activities",
+      "title": "Activités & Excursions",
+      "body": "Activités et excursions mentionnées dans le contenu scrapé. Pour les prix d'activités non fournis : écrire 'Tarif à confirmer.'"
     }},
     {{
-      "id": "price", 
-      "type": "Price", 
-      "title": "Tarifs & Conditions", 
-      "body": "Prix détaillé par personne, suppléments, conditions de réservation, acompte, annulation, assurance, etc."
+      "id": "price",
+      "type": "Price",
+      "title": "Tarifs & Conditions",
+      "body": "{"Prix par personne trouvés dans les données scrapées : " + str(price_snippets) + ". Conditions de réservation si mentionnées." if has_scraped_prices else "Prix total du circuit : À confirmer avec l agence. Ne pas inventer de montant. Indiquer les éléments inclus (vols, hébergements, transferts, activités) et ceux à régler sur place. Conditions d annulation : À confirmer."}"
     }}
   ],
   "cta": {{
@@ -2200,7 +2262,10 @@ EXIGENCES SPÉCIFIQUES CIRCUIT :
 
     def _get_prompt_sejour(self, text_input, website_descriptions=None, example_templates=None, travel_date=None, return_date=None, real_time_search=None, real_flights_context=None, offer_type="sejour"):
         """Prompt pour un Séjour (transport et/ou hôtel)"""
-        
+
+        # Détecter si le scraping a trouvé de vrais prix
+        has_scraped_prices, price_snippets = self._detect_scraped_prices(website_descriptions)
+
         # Ajouter les descriptions des sites web si disponibles
         website_context = ""
         if website_descriptions and len(website_descriptions) > 0:
@@ -2288,67 +2353,67 @@ EXIGENCES SPÉCIFIQUES CIRCUIT :
 {flights_context}
 
 🚨🚨🚨 RÈGLES ABSOLUES :
-1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Copie les descriptions du site, ne crée pas tes propres descriptions.
-2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans la section "DATES DU VOYAGE" ci-dessus. N'invente PAS d'autres dates.
-3. Pour les vols : 
-   - Si des VOLS RÉELS ont été fournis ci-dessus (section "VOLS RÉELS TROUVÉS"), utilise-les EXACTEMENT (numéro de vol, compagnie, horaires, aéroports)
-   - Les dates de départ et retour doivent être celles fournies dans "DATES DU VOYAGE", pas d'autres dates
-   - Si AUCUN vol réel n'a été fourni, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs
-4. Pour les transferts : 
-   - Si des informations de transferts ont été trouvées dans les sites web scrapés, utilise-les EXACTEMENT et crée une section "Transferts"
-   - Si AUCUNE information de transfert n'a été trouvée dans les sites scrapés, NE CRÉE PAS de section "Transferts" du tout - omets complètement cette section du JSON
-
-IMPORTANT : Sois TRÈS DÉTAILLÉ dans chaque section. Inclus des informations spécifiques, des prix, des horaires, des descriptions complètes.
+1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Ne crée pas tes propres descriptions.
+2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans "DATES DU VOYAGE". N'invente PAS d'autres dates.
+3. Pour les vols :
+   - Si des VOLS RÉELS ont été fournis (section "VOLS RÉELS TROUVÉS"), utilise-les EXACTEMENT.
+   - Si AUCUN vol réel n'a été fourni, n'invente PAS de numéros de vol fictifs.
+4. Pour les transferts :
+   - Si des informations de transferts ont été trouvées dans les sites scrapés, utilise-les EXACTEMENT.
+   - Si AUCUNE information de transfert n'a été trouvée, NE CRÉE PAS de section "Transferts".
+5. Pour les prix d'hébergement :
+{"   - Des prix RÉELS ont été trouvés dans le contenu scrapé : " + str(price_snippets) + ". Utilise UNIQUEMENT ces prix." if has_scraped_prices else "   - AUCUN prix réel n'a été trouvé dans le contenu scrapé."}
+{"   - Utilise les prix tels qu'ils apparaissent dans les données scrapées." if has_scraped_prices else "   - N'INVENTE PAS de prix par nuit, tarif de chambre ou prix de séjour."}
+{"" if has_scraped_prices else "   - Pour toute mention de prix : écrire 'Prix à confirmer avec l établissement.'"}
+{"" if has_scraped_prices else "   - N'écris PAS de montants en euros (850€/nuit, 1 200€...) si tu ne les as pas dans le contenu scrapé."}
 
 Format JSON strict :
 {{
-  "title": "Titre accrocheur et mémorable pour le séjour",
-  "introduction": "Description complète et engageante du séjour (3-4 phrases minimum). IMPORTANT : Si des informations de sites web ont été fournies, utilise-les EXACTEMENT pour cette introduction, pas tes propres descriptions.",
+  "title": "Titre accrocheur pour le séjour",
+  "introduction": "Description du séjour basée sur le contenu scrapé (3-4 phrases).",
   "sections": [
     {{
       "id": "flights",
-      "type": "Flights", 
-      "title": "Transport Aérien", 
-      "body": "Détails COMPLETS des vols : compagnie, numéros de vol, horaires précis, classe de service, durée du vol, aéroports, bagages inclus, repas à bord, etc. 🚨🚨🚨 SI DES VOLS RÉELS ONT ÉTÉ FOURNIS CI-DESSUS (section VOLS RÉELS TROUVÉS), UTILISE LES EXACTEMENT (numéro de vol, compagnie, horaires, aéroports). Sinon, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs."
+      "type": "Flights",
+      "title": "Transport Aérien",
+      "body": "Vols de la section VOLS RÉELS uniquement. N'invente pas de numéros de vol ni d'horaires."
     }},
     {{
-      "id": "transfers", 
-      "type": "Transfers", 
-      "title": "Transferts", 
-      "body": "Détails des transferts aéroport-hôtel : type de véhicule, durée, horaires, chauffeur, accueil à l'aéroport, etc. 🚨🚨🚨 SI DES INFORMATIONS DE TRANSFERTS ONT ÉTÉ FOURNIES CI-DESSUS (section SITES WEB SCRAPÉS), UTILISE LES EXACTEMENT et crée cette section. SI AUCUNE INFO DE TRANSFERT N'A ÉTÉ TROUVÉE DANS LES SITES SCRAPÉS, NE CRÉE PAS CETTE SECTION DU TOUT - omets-la du JSON."
+      "id": "transfers",
+      "type": "Transfers",
+      "title": "Transferts",
+      "body": "Transferts trouvés dans les sites scrapés uniquement. Omets cette section si aucune info n'est disponible."
     }},
     {{
-      "id": "hotel", 
-      "type": "Hotel", 
-      "title": "Hébergement", 
-      "body": "Description DÉTAILLÉE de l'hôtel : nom, catégorie, localisation, type de chambre, pension (petit-déjeuner, demi-pension, pension complète), équipements, services, vue, piscine, spa, etc."
+      "id": "hotel",
+      "type": "Hotel",
+      "title": "Hébergement",
+      "body": "{"Nom, catégorie, localisation, équipements, pension et prix de l hôtel TELS QUE FOURNIS dans le contenu scrapé." if has_scraped_prices else "Nom, catégorie, localisation et équipements de l hôtel si mentionnés dans le contenu scrapé. Pour les prix : écrire exactement 'Prix à confirmer avec l établissement.' Ne pas inventer de tarif par nuit ou par personne."}"
     }},
     {{
-      "id": "services", 
-      "type": "Services", 
-      "title": "Services Inclus", 
-      "body": "Détails des services inclus dans le séjour : repas, accès aux équipements, activités sur place, etc."
+      "id": "services",
+      "type": "Services",
+      "title": "Services Inclus",
+      "body": "Services inclus mentionnés dans le contenu scrapé. Pour les services non confirmés : écrire 'À confirmer avec l établissement.'"
     }},
     {{
-      "id": "price", 
-      "type": "Price", 
-      "title": "Tarifs & Conditions", 
-      "body": "Prix détaillé par personne, par nuit, suppléments, conditions de réservation, acompte, annulation, assurance, etc."
+      "id": "price",
+      "type": "Price",
+      "title": "Tarifs & Conditions",
+      "body": "{"Prix trouvés dans les données scrapées : " + str(price_snippets) + ". Conditions si mentionnées." if has_scraped_prices else "Prix du séjour : À confirmer avec l agence. Lister les éléments inclus (vols, hébergement, transferts) et ceux non inclus. Conditions d annulation : À confirmer. Ne pas inventer de montants."}"
     }}
   ],
   "cta": {{
-    "title": "Réservez votre séjour de rêve !", 
-    "description": "Offre limitée - Ne manquez pas cette opportunité unique", 
+    "title": "Réservez votre séjour",
+    "description": "Contactez-nous pour confirmer votre réservation",
     "buttonText": "Réserver maintenant"
   }}
 }}
 
 EXIGENCES SPÉCIFIQUES SÉJOUR :
-- Focus sur l'hébergement et le transport (vols + transferts)
-- Décris en détail l'hôtel : chambres, services, équipements, restauration
-- Chaque section doit contenir au moins 150-200 mots de contenu détaillé
-- Sois professionnel mais engageant
-- Inclus des détails sur les services, équipements, et conditions
+- Focus sur l'hébergement et le transport
+- Utilise UNIQUEMENT les informations des sites scrapés et des données de vol réelles
+- Pour tout champ sans données réelles : écrire "À confirmer" plutôt qu'inventer
 
 ⚠️⚠️⚠️ FORMAT JSON CRITIQUE ⚠️⚠️⚠️
 - Réponds UNIQUEMENT avec un JSON valide, sans texte avant ou après
@@ -2446,9 +2511,9 @@ EXIGENCES SPÉCIFIQUES SÉJOUR :
         flight_instructions = ""
         has_flight_keywords = any(keyword in text_input.lower() for keyword in ['date', 'heure', 'jour', 'départ', 'arrivée', 'vol'])
         
-        # Vérifier si on a des informations réelles de vols depuis les sites ou Tavily
-        has_real_flight_info = False
-        if website_descriptions:
+        # Vérifier si on a des informations réelles de vols (Amadeus, sites web, ou Tavily)
+        has_real_flight_info = bool(real_flights_context)  # Amadeus Flight Status = source prioritaire
+        if not has_real_flight_info and website_descriptions:
             for desc in website_descriptions:
                 content = desc.get('content', '').lower()
                 # Vérifier qu'il y a vraiment des infos de vol (pas juste des mots-clés négatifs)
@@ -2473,97 +2538,104 @@ EXIGENCES SPÉCIFIQUES SÉJOUR :
         
         if has_flight_keywords or real_time_search or has_real_flight_info:
             flight_instructions = "\n\n✈️ INSTRUCTIONS SPÉCIALES POUR LES VOLS :\n"
-            
-            if not has_real_flight_info and offer_type == "transport":
+
+            if has_real_flight_info and real_flights_context:
+                flight_instructions += "🚨🚨🚨 VOLS RÉELS AMADEUS DISPONIBLES — UTILISE-LES OBLIGATOIREMENT :\n"
+                flight_instructions += "- Des vols RÉELS ont été trouvés via l'API Amadeus Flight Status (voir section VOLS RÉELS ci-dessus)\n"
+                flight_instructions += "- Utilise EXACTEMENT ces numéros de vol, compagnies, aéroports, horaires, terminaux et escales\n"
+                flight_instructions += "- N'invente AUCUNE information supplémentaire non présente dans ces données\n"
+                flight_instructions += "- Si le vol est 'aller', indique-le clairement. Si un vol 'retour' est aussi fourni, inclus-le dans une section séparée.\n"
+                flight_instructions += "- Les informations Amadeus sont vérifiables par les clients — NE LES MODIFIE PAS\n"
+            elif not has_real_flight_info and offer_type == "transport":
                 flight_instructions += "🚨🚨🚨🚨🚨 CRITIQUE ABSOLUE - TRANSPORT SEUL :\n"
-                flight_instructions += "- AUCUNE information de vol réelle trouvée dans les sites web scrapés ni dans les recherches Tavily\n"
+                flight_instructions += "- AUCUNE information de vol réelle disponible\n"
                 flight_instructions += "- INTERDICTION TOTALE : NE CRÉE ABSOLUMENT PAS de section de vol avec des informations inventées\n"
-                flight_instructions += "- NE CRÉE PAS de section de type 'Flights' si tu n'as pas d'informations RÉELLES\n"
                 flight_instructions += "- N'INVENTE JAMAIS de numéros de vol (UA 123, AF 456, etc.)\n"
                 flight_instructions += "- N'INVENTE JAMAIS d'horaires (22h00, 17h30, etc.)\n"
                 flight_instructions += "- N'INVENTE JAMAIS de compagnies aériennes\n"
-                flight_instructions += "- Si tu ne peux pas créer une offre de transport avec des informations RÉELLES, crée UNE SEULE section 'Avertissement' qui dit : '⚠️ Les informations de vol pour cette route/date ne sont pas disponibles. Veuillez vérifier directement auprès des compagnies aériennes.'\n"
+                flight_instructions += "- Crée UNE SEULE section 'Avertissement' : '⚠️ Les informations de vol pour cette route/date ne sont pas disponibles. Veuillez vérifier directement auprès des compagnies aériennes.'\n"
                 flight_instructions += "- C'est UN PROBLÈME GRAVE si tu inventes des vols - ces informations seront données à des clients réels\n"
             elif real_time_search:
-                flight_instructions += "⚠️⚠️⚠️ ATTENTION : Des recherches en temps réel ont été effectuées. Utilise EN PRIORITÉ les informations réelles trouvées dans les résultats de recherche ci-dessus (horaires, prix, compagnies, disponibilités).\n"
-            
-            if has_real_flight_info:
+                flight_instructions += "⚠️⚠️⚠️ ATTENTION : Des recherches en temps réel ont été effectuées. Utilise EN PRIORITÉ les informations réelles trouvées dans les résultats de recherche ci-dessus.\n"
+
+            if has_real_flight_info and not real_flights_context:
                 flight_instructions += "- Utilise UNIQUEMENT les informations de vols trouvées dans les sites web scrapés ou les recherches Tavily\n"
-                flight_instructions += "- Si des dates, heures ou jours sont mentionnés dans les données scrapées, utilise-les EXACTEMENT comme indiqué\n"
-                flight_instructions += "- Pour les vols, structure les informations de manière réaliste : numéro de vol (ex: AF 1234), compagnie, horaires précis (départ/arrivée), aéroports (codes IATA si possible), durée de vol\n"
-                flight_instructions += "- Utilise des compagnies aériennes réelles qui desservent la route mentionnée\n"
-                flight_instructions += "- Les horaires doivent être cohérents avec les fuseaux horaires et les durées de vol réelles\n"
+                flight_instructions += "- Structure les informations : numéro de vol, compagnie, horaires précis, aéroports (codes IATA), durée\n"
         
-        return f"""Crée une offre de TRANSPORT SEUL DÉTAILLÉE et PROFESSIONNELLE pour : {text_input}
+        return f"""Tu es un assistant pour une agence de voyage. Crée une offre de TRANSPORT SEUL pour : {text_input}
 {website_context}
 {dates_context}
 {templates_context}
 {real_time_context}
 {flight_instructions}
 
-🚨🚨🚨 RÈGLES ABSOLUES :
-1. Pour l'introduction : Si des informations de sites web ont été fournies ci-dessus, utilise-les EXACTEMENT. Copie les descriptions du site, ne crée pas tes propres descriptions.
-2. Pour les dates : Utilise UNIQUEMENT les dates fournies dans la section "DATES DU VOYAGE" ci-dessus. N'invente PAS d'autres dates.
-3. Pour les vols : Les dates de départ et retour doivent être celles fournies dans "DATES DU VOYAGE", pas d'autres dates. Les horaires peuvent venir des recherches Tavily, mais les DATES doivent être celles fournies.
-4. 🚨🚨🚨🚨🚨 RÈGLE ABSOLUE - INTERDICTION TOTALE D'INVENTER DES VOLS : 
-   - SI les recherches Tavily montrent "aucun vol trouvé", "no flights available", "pas de vol disponible" → INTERDICTION TOTALE de créer une section de vol avec des infos inventées.
-   - SI les sites web scrapés n'ont PAS d'informations de vol réelles → NE CRÉE PAS de section de vol avec des données fictives.
-   - NE JAMAIS inventer de numéros de vol (UA 123, AF 456, etc.) - C'EST TRÈS GRAVE, ces infos vont à des clients réels.
-   - NE JAMAIS inventer d'horaires (22h00, 17h30, etc.) - C'EST MENTIR aux clients.
-   - NE JAMAIS inventer de compagnies aériennes ou de routes - C'EST ILLÉGAL de mentir aux clients.
-   - SI tu n'as PAS d'informations RÉELLES de vol → NE CRÉE PAS de section "Flights" du tout, OU crée UNE section "Avertissement" qui dit : "⚠️ Les informations de vol ne sont pas disponibles pour cette route/date. Contactez directement les compagnies aériennes pour vérifier les disponibilités et horaires."
-   - C'EST UN PROBLÈME CRITIQUE si tu inventes des vols - tu mets des clients en danger avec de fausses informations.
-   - Si les sources indiquent "aucun vol trouvé", tu DOIS respecter ça et NE PAS créer de section de vol inventée.
+🚨🚨🚨 RÈGLES ABSOLUES — SOURCES AUTORISÉES PAR SECTION :
 
-IMPORTANT : Sois TRÈS DÉTAILLÉ dans chaque section. Inclus des informations spécifiques, des prix, des horaires, des descriptions complètes. MAIS n'invente RIEN qui ne soit pas dans les données fournies.
+SECTION "Transport Aérien" — utilise UNIQUEMENT les champs de la section "VOLS RÉELS" ci-dessus :
+  ✅ Numéro de vol, compagnie, aéroports, horaires, durée, terminaux → tels quels
+  ✅ Porte (gate) → seulement si "Porte départ/arrivée" est listé. Sinon : NE PAS MENTIONNER.
+  ✅ Escales → seulement si "Segments du trajet" est listé. Vol direct si stops = 0.
+  ✅ Prix → utilise le champ "Prix:" tel quel (ex: "450 EUR"). Si "À confirmer", écris exactement "Prix à confirmer avec la compagnie".
+  ✅ Si un vol indique "⚠️ ATTENTION DATE" → mentionne clairement dans l'offre que c'est le vol le plus proche trouvé et précise les deux dates (demandée vs réelle).
+  ✅ Si un vol indique "(NON CONFIRMÉ PAR AMADEUS)" → inclus le numéro de vol et la date demandée tels quels, puis copie la NOTE AGENT mot pour mot dans le body (elle sera supprimée par l'agent). N'invente PAS d'horaires, aéroports ou terminaux.
+  ❌ N'invente PAS de numéros de vol, horaires, aéroports, terminaux, portes, prix non fournis.
 
-Format JSON strict :
+SECTION "Bagages" — utilise UNIQUEMENT la section "BAGAGES (politique officielle)" ci-dessus :
+  ✅ Copie exactement les informations de bagages cabine et soute pour la classe indiquée.
+  ❌ N'invente PAS de dimensions, poids, frais non mentionnés.
+  Si une information manque → écris "À confirmer avec la compagnie."
+
+SECTION "Services à Bord" — utilise UNIQUEMENT les sections "REPAS", "DIVERTISSEMENT", "WI-FI", "SIÈGES" ci-dessus :
+  ✅ Copie exactement les informations officielles de la compagnie.
+  ❌ N'invente PAS de services non listés (pas de "200+ films" si non mentionné, pas de "USB" si non listé).
+  Si une information manque → écris "À confirmer avec la compagnie."
+
+SECTION "Tarifs & Conditions" :
+  ✅ Prix : utilise UNIQUEMENT le prix fourni dans "VOLS RÉELS" (champ Prix:).
+  ✅ Bagages inclus : reprends les infos bagages officielles.
+  ❌ N'invente PAS de conditions d'annulation, d'acompte, de frais de modification non fournis.
+  Pour les conditions non fournies → écris "Conditions à confirmer avec la compagnie."
+
+FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
 {{
-  "title": "Titre accrocheur et mémorable pour le transport",
-  "introduction": "Description complète et engageante du service de transport (3-4 phrases minimum). IMPORTANT : Si des informations de sites web ont été fournies, utilise-les EXACTEMENT pour cette introduction, pas tes propres descriptions.",
+  "title": "Titre professionnel reprenant la route et la compagnie",
+  "introduction": "2-3 phrases présentant le vol avec les informations RÉELLES (compagnie, route, horaires). Utilise uniquement les données fournies.",
   "sections": [
     {{
-      "id": "flights", 
-      "type": "Flights", 
-      "title": "Transport Aérien", 
-      "body": "Détails COMPLETS des vols : compagnie aérienne, numéros de vol, horaires précis (départ et arrivée), classe de service (Économique, Premium, Affaires, Première), durée du vol, aéroports de départ et d'arrivée, terminal, bagages inclus (cabine et soute), repas à bord, équipements, sièges, etc. 🚨🚨🚨 SI DES VOLS RÉELS ONT ÉTÉ FOURNIS CI-DESSUS (section VOLS RÉELS TROUVÉS), UTILISE LES EXACTEMENT. Sinon, utilise les dates fournies mais n'invente PAS de numéros de vol fictifs."
+      "id": "flights",
+      "type": "Flights",
+      "title": "Transport Aérien",
+      "body": "Reprends EXACTEMENT les informations de la section VOLS RÉELS. Structure : Vol aller / Vol retour si applicable. Pour chaque vol : numéro, compagnie, aéroport départ + terminal (si fourni), heure départ, aéroport arrivée + terminal (si fourni), heure arrivée, durée, type (direct ou escales), prix. N'ajoute PAS d'informations non fournies."
     }},
     {{
-      "id": "baggage", 
-      "type": "Bagage", 
-      "title": "Bagages", 
-      "body": "Détails COMPLETS sur les bagages : poids et dimensions autorisés pour bagage cabine, bagage en soute, frais supplémentaires, restrictions, etc."
+      "id": "baggage",
+      "type": "Bagage",
+      "title": "Bagages",
+      "body": "Reprends EXACTEMENT la politique bagages officielle de la compagnie fournie ci-dessus. Pour les informations manquantes : À confirmer avec la compagnie."
     }},
     {{
-      "id": "services", 
-      "type": "Services", 
-      "title": "Services à Bord", 
-      "body": "Description des services inclus : repas, boissons, divertissement, Wi-Fi, prises électriques, espace pour les jambes, équipements de la compagnie, etc."
+      "id": "services",
+      "type": "Services",
+      "title": "Services à Bord",
+      "body": "Reprends EXACTEMENT les services officiels de la compagnie fournis ci-dessus (repas, divertissement, Wi-Fi, sièges). Pour les informations manquantes : À confirmer avec la compagnie."
     }},
     {{
-      "id": "price", 
-      "type": "Price", 
-      "title": "Tarifs & Conditions", 
-      "body": "Prix détaillé par personne, par classe de service, suppléments (bagages, siège, repas), conditions de réservation, acompte, annulation, modification, assurance, etc."
+      "id": "price",
+      "type": "Price",
+      "title": "Tarifs & Conditions",
+      "body": "Prix : utilise UNIQUEMENT le prix fourni dans les données de vol. Bagages inclus : reprends les données officielles. Conditions d'annulation/modification : À confirmer avec la compagnie si non fournies."
     }}
   ],
   "cta": {{
-    "title": "Réservez votre transport !", 
-    "description": "Offre limitée - Ne manquez pas cette opportunité unique", 
+    "title": "Réservez votre vol",
+    "description": "Contactez-nous pour confirmer votre réservation",
     "buttonText": "Réserver maintenant"
   }}
 }}
 
-EXIGENCES SPÉCIFIQUES TRANSPORT :
-- Focus UNIQUEMENT sur le transport (vols aériens)
-- Détaille TOUT sur les vols : horaires, compagnies, classes, bagages, services
-- Chaque section doit contenir au moins 150-200 mots de contenu détaillé
-- Sois professionnel mais engageant
-- Inclus tous les détails pratiques pour le transport
-
 ⚠️⚠️⚠️ FORMAT JSON CRITIQUE ⚠️⚠️⚠️
 - Réponds UNIQUEMENT avec un JSON valide, sans texte avant ou après
-- Utilise TOUJOURS des guillemets doubles " pour les chaînes, jamais d'apostrophes '
+- Utilise TOUJOURS des guillemets doubles " pour les chaînes
 - Échappe les guillemets dans le texte avec \\"
 - Vérifie que toutes les accolades {{ et }} sont bien fermées
 - Vérifie qu'il n'y a pas de virgule après le dernier élément d'un tableau ou objet"""
@@ -2571,33 +2643,40 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
     def post(self, request):
         text_input = request.data.get("text")
         offer_type = request.data.get("offer_type", "circuit")  # Par défaut circuit
-        flight_input = request.data.get("flight_input")  # ✅ Infos de vol (format GDS, numéro, texte libre)
+        flight_input = request.data.get("flight_input")  # Ancien champ texte libre (compatibilité)
         company_info = request.data.get("company_info", {})
         website_urls = request.data.get("website_urls", [])  # ✅ Liste d'URLs de sites à scraper
         example_templates = request.data.get("example_templates", [])  # ✅ Exemples de templates
-        
-        # Les champs origin, destination, travel_date, return_date peuvent encore être fournis pour compatibilité
-        # mais ne sont plus affichés dans le frontend (extraits automatiquement depuis flight_input)
+
+        # Nouveaux champs structurés pour la recherche Flight Status Amadeus
+        outbound_flight_number = request.data.get("outbound_flight_number")  # Ex: "AF001"
+        outbound_date = request.data.get("outbound_date")  # Ex: "2025-11-18"
+        return_flight_number = request.data.get("return_flight_number")  # Ex: "AF002" (optionnel)
+        return_flight_date = request.data.get("return_flight_date")  # Ex: "2025-11-27" (optionnel)
+
+        # Les champs origin, destination, travel_date, return_date pour compatibilité legacy
         origin = request.data.get("origin", "Paris")
         destination = request.data.get("destination")
         travel_date = request.data.get("travel_date")
         return_date = request.data.get("return_date")
-        
+
         print(f"📥 Requête reçue:")
         print(f"   - offer_type: {offer_type}")
-        print(f"   - flight_input: {flight_input[:100] if flight_input else 'Non fourni'}{'...' if flight_input and len(flight_input) > 100 else ''}")
+        print(f"   - outbound_flight: {outbound_flight_number} / {outbound_date}")
+        print(f"   - return_flight: {return_flight_number} / {return_flight_date}")
+        print(f"   - flight_input (legacy): {flight_input[:100] if flight_input else 'Non fourni'}")
         print(f"   - text_input longueur: {len(text_input) if text_input else 0} caractères")
-        if travel_date or destination:
-            print(f"   - Params legacy (si fournis): date={travel_date}, dest={destination}")
-        
-        # Validation : soit text_input, soit flight_input doit être fourni
-        if not text_input and not flight_input:
-            return Response({"error": "Texte ou infos de vol requis"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Si seulement flight_input est fourni, créer un text_input minimal
-        if not text_input and flight_input:
-            text_input = f"Demande de devis pour le(s) vol(s) suivant(s) : {flight_input}"
-            print(f"   ℹ️ Texte auto-généré depuis flight_input")
+
+        # Validation : soit text_input, soit vol structuré (numéro + date), soit flight_input
+        has_structured_flight = bool(outbound_flight_number and outbound_date)
+        if not text_input and not has_structured_flight and not flight_input:
+            return Response({"error": "Texte ou infos de vol requis (numéro de vol + date)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Si seulement le vol est fourni, créer un text_input minimal
+        if not text_input and (has_structured_flight or flight_input):
+            vol_desc = f"vol {outbound_flight_number} du {outbound_date}" if has_structured_flight else flight_input
+            text_input = f"Demande de devis pour le(s) vol(s) suivant(s) : {vol_desc}"
+            print(f"   ℹ️ Texte auto-généré depuis les infos de vol")
         
         try:
             # Récupérer les descriptions des sites web si des URLs sont fournies
@@ -2638,75 +2717,142 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
             elif default_templates:
                 print(f"✅ Utilisation du template par défaut uniquement")
             
-            # Recherche de VRAIS vols avec Amadeus (via recherche intelligente)
+            # Recherche de VRAIS vols avec Amadeus Flight Status API
             real_flights_data = None
             real_time_search_results = None  # TOUJOURS None - Tavily désactivé
             search_metadata = {}
-            
-            # Priorité 1 : Si flight_input est fourni, utiliser la recherche intelligente
-            # Priorité 2 : Sinon, logique classique (origine/destination)
-            use_smart_search = bool(flight_input)
-            
+
             print("=" * 80)
-            print("🔍 DÉBUT RECHERCHE DE VOLS - AMADEUS (SMART SEARCH)")
+            print("🔍 DÉBUT RECHERCHE DE VOLS - AMADEUS FLIGHT STATUS API")
             print("=" * 80)
-            print(f"   - Mode: {'SMART SEARCH (format libre)' if use_smart_search else 'CLASSIQUE (origine/destination)'}")
-            print(f"   - flight_input fourni: {bool(flight_input)}")
-            if flight_input:
-                print(f"   - flight_input value: '{flight_input[:100]}'")
-            print(f"   - offer_type: {offer_type}")
-            print(f"   - travel_date: {travel_date}")
-            print(f"   - return_date: {return_date}")
+            print(f"   - Vol aller: {outbound_flight_number} / {outbound_date}")
+            print(f"   - Vol retour: {return_flight_number} / {return_flight_date}")
+            print(f"   - flight_input legacy: {bool(flight_input)}")
             print()
-            
-            # MODE 1 : Recherche intelligente (prioritaire si flight_input fourni)
-            if use_smart_search:
-                print(f"✈️ Mode SMART SEARCH - Recherche intelligente avec parsing automatique")
-                print(f"   Input: '{flight_input}'")
-                
+
+            # MODE 1 : Nouveaux champs structurés (numéro de vol + date)
+            if has_structured_flight:
+                print(f"✈️ Mode FLIGHT STATUS - Recherche par numéro de vol (Amadeus)")
+                from api.amadeus_integration import AmadeusFlightService
+                from django.conf import settings
+
+                try:
+                    use_test = getattr(settings, 'AMADEUS_USE_TEST', True)
+                    amadeus_service = AmadeusFlightService(use_test=use_test)
+                    flights_collected = []
+
+                    from api.airline_services import format_airline_services_for_prompt
+
+                    def _enrich_flight(flight_result, leg_label):
+                        """Ajoute prix Amadeus + services compagnie à un vol."""
+                        flight_result['leg'] = leg_label
+                        carrier = flight_result.get('carrier_code', '')
+                        dep = flight_result.get('departure_airport')
+                        arr = flight_result.get('arrival_airport')
+                        date = flight_result.get('departure_datetime_full', '')[:10] if flight_result.get('departure_datetime_full') else ''
+                        fn_raw = flight_result.get('flight_number', '').replace(carrier, '')
+
+                        # Prix via Flight Offers API
+                        if dep and arr and date:
+                            try:
+                                price_info = amadeus_service.get_flight_price(
+                                    origin=dep,
+                                    destination=arr,
+                                    departure_date=date,
+                                    carrier_code=carrier,
+                                    flight_number=fn_raw,
+                                )
+                                if price_info:
+                                    flight_result['price'] = price_info.get('price')
+                                    flight_result['price_base'] = price_info.get('base_price')
+                                    flight_result['currency'] = price_info.get('currency', 'EUR')
+                                    flight_result['cabin_class'] = price_info.get('cabin_class')
+                                    flight_result['price_note'] = price_info.get('note')
+                                    print(f"   💰 Prix {leg_label}: {flight_result['price']} {flight_result['currency']}")
+                                else:
+                                    print(f"   ℹ️ Prix non disponible pour {leg_label}")
+                            except Exception as pe:
+                                print(f"   ⚠️ Erreur prix {leg_label}: {str(pe)}")
+
+                        # Services officiels de la compagnie
+                        if carrier:
+                            flight_result['airline_services_context'] = format_airline_services_for_prompt(carrier)
+
+                        return flight_result
+
+                    def _make_placeholder(fn, date, leg):
+                        """Crée un vol placeholder quand Amadeus ne trouve rien."""
+                        carrier = fn[:2].upper() if len(fn) >= 2 else ''
+                        placeholder = {
+                            'flight_number': fn.upper(),
+                            'carrier_code': carrier,
+                            'requested_date': date,
+                            'leg': leg,
+                            'not_found': True,
+                        }
+                        if carrier:
+                            placeholder['airline_services_context'] = format_airline_services_for_prompt(carrier)
+                        return placeholder
+
+                    def _search_and_enrich(fn, date, leg):
+                        """Cherche un vol et l'enrichit (schedule + prix) en une seule tâche."""
+                        result = amadeus_service.get_flight_by_number(fn, date)
+                        if result:
+                            return _enrich_flight(result, leg)
+                        return _make_placeholder(fn, date, leg)
+
+                    # Lancer aller + retour EN PARALLÈLE (schedule + prix inclus)
+                    legs_to_search = [
+                        (outbound_flight_number, outbound_date, 'aller'),
+                    ]
+                    if return_flight_number and return_flight_date:
+                        legs_to_search.append((return_flight_number, return_flight_date, 'retour'))
+
+                    print(f"   🚀 Recherche parallèle de {len(legs_to_search)} vol(s)...")
+                    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+                    with ThreadPoolExecutor(max_workers=len(legs_to_search)) as ex:
+                        future_to_leg = {
+                            ex.submit(_search_and_enrich, fn, date, leg): leg
+                            for fn, date, leg in legs_to_search
+                        }
+                        for future in _as_completed(future_to_leg):
+                            leg = future_to_leg[future]
+                            result = future.result()
+                            if result:
+                                flights_collected.append(result)
+                                if result.get('not_found'):
+                                    print(f"   ⚠️ Vol {leg} non trouvé — placeholder ajouté")
+                                else:
+                                    print(f"   ✅ Vol {leg} trouvé: {result.get('departure_airport')} → {result.get('arrival_airport')}")
+
+                    if flights_collected:
+                        real_flights_data = flights_collected
+                        search_metadata['source'] = 'amadeus_flight_status'
+                        search_metadata['search_strategy'] = 'flight_number'
+                        search_metadata['has_valid_flight_info'] = True
+                        search_metadata['real_flights_count'] = len(flights_collected)
+                    else:
+                        search_metadata['has_valid_flight_info'] = False
+                        search_metadata['failure_reason'] = ['flight_not_found_in_amadeus']
+
+                except Exception as e:
+                    print(f"❌ Erreur Amadeus Flight Status: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    search_metadata['has_valid_flight_info'] = False
+                    search_metadata['failure_reason'] = [f'amadeus_error: {str(e)}']
+
+            # MODE 2 : Ancien champ texte libre (compatibilité)
+            elif flight_input:
+                print(f"✈️ Mode SMART SEARCH (legacy) - Parsing automatique du texte")
                 real_flights_data = self._search_flights_smart(flight_input, search_metadata)
-                
                 if real_flights_data:
-                    print(f"✅ {len(real_flights_data)} vol(s) trouvé(s) via recherche intelligente")
-                    print(f"   Stratégie utilisée: {search_metadata.get('search_strategy')}")
-                    if search_metadata.get('parsed_data'):
-                        parsed = search_metadata['parsed_data']
-                        print(f"   Infos parsées:")
-                        if parsed.get('origin_airport'):
-                            print(f"      - Origine: {parsed['origin_airport']}")
-                        if parsed.get('destination_airport'):
-                            print(f"      - Destination: {parsed['destination_airport']}")
-                        if parsed.get('departure_date'):
-                            print(f"      - Date départ: {parsed['departure_date']}")
-                        if parsed.get('return_date'):
-                            print(f"      - Date retour: {parsed['return_date']}")
+                    print(f"✅ {len(real_flights_data)} vol(s) trouvé(s) via smart search")
                 else:
-                    print(f"⚠️ Aucun vol trouvé via recherche intelligente")
-                    if search_metadata.get('parsed_data'):
-                        print(f"   Mais infos parsées disponibles:")
-                        parsed = search_metadata['parsed_data']
-                        if parsed.get('origin_airport'):
-                            print(f"      - Origine: {parsed['origin_airport']}")
-                        if parsed.get('destination_airport'):
-                            print(f"      - Destination: {parsed['destination_airport']}")
-            
-            # MODE 2 : Logique classique (fallback si pas de flight_input)
-            elif travel_date or offer_type == "transport":
-                print(f"✈️ Mode CLASSIQUE - Recherche par origine/destination (fallback)")
-                print(f"   Note: Pour utiliser le format GDS/numéro de vol, remplissez flight_input")
-                
-                # Code simplifié : juste informer qu'on n'a pas de flight_input
-                print(f"   ℹ️ Aucun flight_input fourni")
-                print(f"   💡 Pour une recherche automatique, utilisez le champ flight_input avec:")
-                print(f"      - Format GDS: '18NOV-25NOV BRU JFK 10:00 14:00'")
-                print(f"      - Numéro de vol: 'AF001 18/11/2025'")
-                print(f"      - Texte libre: 'Vol AF001 de Paris à NY le 18/11'")
-                
-                search_metadata['search_attempted'] = False
-                search_metadata['failure_reason'] = ['no_flight_input_provided']
-            
+                    print(f"⚠️ Aucun vol trouvé via smart search")
+
             else:
-                print(f"   ℹ️ Recherche de vols non activée (pas de flight_input, pas de date)")
+                print(f"   ℹ️ Recherche de vols non activée (pas de numéro de vol fourni)")
                 search_metadata['search_attempted'] = False
             
             # Vérification finale des résultats
@@ -2745,40 +2891,105 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
                 real_flights_context += f"Source: {source_name}\n"
                 
                 for idx, flight in enumerate(real_flights_data, 1):
-                    real_flights_context += f"\n--- Vol {idx} (RÉEL - DEPUIS {source_name.upper()}) ---\n"
+                    leg_label = flight.get('leg', '').upper()
+                    leg_suffix = f" ({leg_label})" if leg_label else ""
+                    if flight.get('not_found'):
+                        # Vol non trouvé par Amadeus → placeholder avec date exacte saisie
+                        real_flights_context += f"\n--- Vol {idx}{leg_suffix} (NON CONFIRMÉ PAR AMADEUS) ---\n"
+                        real_flights_context += f"Numéro de vol: {flight.get('flight_number', 'N/A')}\n"
+                        real_flights_context += f"Date demandée: {flight.get('requested_date', 'N/A')}\n"
+                        real_flights_context += (
+                            f"[NOTE AGENT - À SUPPRIMER AVANT ENVOI AU CLIENT] : "
+                            f"Le vol {flight.get('flight_number')} du {flight.get('requested_date')} "
+                            f"n'a pas pu être confirmé via Amadeus (ni sur les dates proches). "
+                            f"Veuillez vérifier les horaires, aéroports et terminaux directement "
+                            f"auprès de la compagnie avant de transmettre ce document.\n"
+                        )
+                        continue  # Pas d'autres champs à afficher pour un placeholder
+
+                    real_flights_context += f"\n--- Vol {idx}{leg_suffix} (RÉEL - DEPUIS {source_name.upper()}) ---\n"
                     real_flights_context += f"Numéro de vol: {flight.get('flight_number', 'N/A')}\n"
-                    
-                    # Compagnie (peut être 'airline' ou 'carrier_code')
+
+                    # Avertissement si date approchée
+                    if flight.get('date_note'):
+                        real_flights_context += f"⚠️ ATTENTION DATE : {flight['date_note']}\n"
+                        real_flights_context += f"   Date demandée : {flight.get('requested_date', 'N/A')} | Date réelle du vol : {flight.get('actual_date', 'N/A')}\n"
+
+                    # Compagnie
                     airline = flight.get('airline') or flight.get('carrier_code', 'N/A')
                     if airline != 'N/A':
                         real_flights_context += f"Compagnie: {airline}\n"
-                    
-                    # Infos vol
+
+                    # Statut du vol
+                    if flight.get('status'):
+                        real_flights_context += f"Statut: {flight['status']}\n"
+
+                    # Aéroports et horaires
                     real_flights_context += f"Départ: {flight.get('departure_airport', 'N/A')} à {flight.get('departure_time', 'N/A')}\n"
                     real_flights_context += f"Arrivée: {flight.get('arrival_airport', 'N/A')} à {flight.get('arrival_time', 'N/A')}\n"
-                    
-                    # Durée si disponible
+
+                    # Durée
                     if flight.get('duration'):
                         real_flights_context += f"Durée: {flight['duration']}\n"
-                    
+
                     # Type de vol (direct/escales)
-                    if 'stops' in flight:
-                        if flight['stops'] == 0:
+                    stops = flight.get('stops')
+                    if stops is not None:
+                        if stops == 0:
                             real_flights_context += f"Type: Vol direct\n"
                         else:
-                            real_flights_context += f"Type: {flight['stops']} escale(s)\n"
-                    
-                    # Prix si disponible
-                    if flight.get('price'):
-                        real_flights_context += f"Prix: {flight['price']} {flight.get('currency', 'EUR')}\n"
-                    
-                    # Terminaux si disponibles
+                            real_flights_context += f"Type: {stops} escale(s)\n"
+
+                    # Terminaux et portes
                     if flight.get('terminal_departure'):
                         real_flights_context += f"Terminal départ: {flight['terminal_departure']}\n"
+                    if flight.get('gate_departure'):
+                        real_flights_context += f"Porte départ: {flight['gate_departure']}\n"
                     if flight.get('terminal_arrival'):
                         real_flights_context += f"Terminal arrivée: {flight['terminal_arrival']}\n"
-                
-                real_flights_context += f"\n🚨🚨🚨 CRITIQUE : Ces vols sont RÉELS et vérifiables. Utilise EXACTEMENT ces informations."
+                    if flight.get('gate_arrival'):
+                        real_flights_context += f"Porte arrivée: {flight['gate_arrival']}\n"
+
+                    # Type d'avion
+                    if flight.get('aircraft_type'):
+                        real_flights_context += f"Appareil: {flight['aircraft_type']}\n"
+
+                    # Prix (Amadeus Flight Offers)
+                    if flight.get('price'):
+                        price_label = f"{flight['price']} {flight.get('currency', 'EUR')}"
+                        if flight.get('cabin_class'):
+                            price_label += f" (classe {flight['cabin_class']})"
+                        if flight.get('price_note'):
+                            price_label += f" — {flight['price_note']}"
+                        real_flights_context += f"Prix: {price_label}\n"
+                    else:
+                        real_flights_context += f"Prix: À confirmer avec la compagnie\n"
+
+                    # Segments détaillés (pour vols avec escale)
+                    if flight.get('segments'):
+                        real_flights_context += f"Segments du trajet:\n"
+                        for seg in flight['segments']:
+                            real_flights_context += (
+                                f"  Segment {seg['segment_number']}: "
+                                f"{seg['departure_airport']} {seg['departure_time']} → "
+                                f"{seg['arrival_airport']} {seg['arrival_time']}"
+                            )
+                            if seg.get('duration'):
+                                real_flights_context += f" ({seg['duration']})"
+                            if seg.get('departure_terminal'):
+                                real_flights_context += f" | Terminal départ: {seg['departure_terminal']}"
+                            if seg.get('departure_gate'):
+                                real_flights_context += f" Porte: {seg['departure_gate']}"
+                            real_flights_context += "\n"
+
+                real_flights_context += f"\n🚨 RÈGLE STRICTE : Utilise UNIQUEMENT les champs ci-dessus. N'ajoute PAS d'informations non listées (pas de porte si non fournie, pas de prix si 'À confirmer').\n"
+
+                # Ajouter les services officiels de la première compagnie trouvée
+                for flight in real_flights_data:
+                    airline_ctx = flight.get('airline_services_context', '')
+                    if airline_ctx:
+                        real_flights_context += airline_ctx
+                        break  # Une seule compagnie suffit (aller/retour = même compagnie en général)
             
             # Sélectionner le prompt selon le type d'offre
             # IMPORTANT: real_time_search_results est TOUJOURS None (Tavily désactivé)
@@ -2805,9 +3016,9 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
                     {"role": "system", "content": "Expert voyage. JSON uniquement."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=2500,
-                temperature=0.7,
-                timeout=90  # Timeout de 90 secondes pour éviter les worker timeouts
+                max_tokens=2000,
+                temperature=0.3,
+                timeout=60  # Timeout de 60 secondes
             )
             
             offer_json = response.choices[0].message.content
@@ -3268,7 +3479,7 @@ EXIGENCES SPÉCIFIQUES TRANSPORT :
             return
         
         # Limiter le nombre de sections pour éviter les timeouts (seulement pour les sections sans images scrapées)
-        sections_to_process = [s for s in sections if not s.get("image")][:2]  # Max 2 sections seulement
+        sections_to_process = [s for s in sections if not s.get("image")][:1]  # Max 1 section pour limiter les délais
         
         # Traitement asynchrone des images pour éviter les timeouts
         import threading
@@ -3536,50 +3747,110 @@ class PdfToGJSEndpoint(APIView):
         except:
             company_info = {}
 
-        logo_data_url = request.data.get("logo_data_url") or ""
-        background_url = request.data.get("background_url") or ""
-
         try:
             text_md, assets = self._extract_pdf_content(pdf)
-            offer_structure = self._md_to_offer_json(text_md, company_info, assets)
-            
-            # Vérifier que le contenu est valide
+
+            # 1. Parser heuristique (0ms, sans API) — fonctionne sur les PDFs avec titres markdown
+            offer_structure = self._parse_sections_heuristic(text_md)
+
+            # 2. Fallback OpenAI uniquement si le PDF n'est pas structuré (< 2 sections trouvées)
+            if not offer_structure:
+                print("⚠️ Structure non détectée, fallback OpenAI...")
+                offer_structure = self._md_to_offer_json(text_md, company_info)
+
             if not offer_structure or not offer_structure.get('sections') or len(offer_structure.get('sections', [])) == 0:
                 raise Exception("Aucun contenu structuré n'a pu être extrait du PDF")
 
-            # Sauvegarder automatiquement le document importé
+            # 3. Distribuer les images (une par section, sans doublons)
+            self._distribute_images(offer_structure, assets)
+
+            document = None
             try:
+                # Créer d'abord un document placeholder sans images (évite de stocker des data URLs en DB)
                 document = Document.objects.create(
                     title=offer_structure.get('title', 'PDF Importé'),
                     description=f"Document importé le {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
                     document_type='pdf_import',
-                    offer_structure=offer_structure,
+                    offer_structure={},
                     company_info=company_info,
-                    assets=assets
+                    assets=[]
                 )
-                print(f"✅ Document sauvegardé avec {len(assets)} image(s)")
-                
-                # Sauvegarder le fichier PDF original
-                pdf.seek(0)  # Reset file pointer
+
+                # Sauvegarder les images en parallèle (max 8 images, redimensionnées)
+                from PIL import Image as PILImage
+                import io as _io
+
+                def _save_asset(args):
+                    i, asset, doc_id = args
+                    try:
+                        header, b64data = asset['data_url'].split(',', 1)
+                        file_bytes = base64.b64decode(b64data)
+                        # Redimensionner à max 1200px pour réduire la taille
+                        try:
+                            img = PILImage.open(_io.BytesIO(file_bytes))
+                            if max(img.size) > 1200:
+                                img.thumbnail((1200, 1200), PILImage.LANCZOS)
+                            buf = _io.BytesIO()
+                            img.save(buf, format='JPEG', quality=82, optimize=True)
+                            file_bytes = buf.getvalue()
+                            ext = 'jpg'
+                        except Exception:
+                            ext = 'png' if 'image/png' in header else 'jpg'
+                        filename = f"documents/assets/doc{doc_id}_{i}.{ext}"
+                        saved_path = default_storage.save(filename, ContentFile(file_bytes))
+                        return i, asset['data_url'], saved_path, ext, len(file_bytes)
+                    except Exception as ae:
+                        print(f"⚠️ Erreur sauvegarde asset {i}: {ae}")
+                        return i, None, None, None, 0
+
+                limited_assets = assets[:10]  # Max 10 images
+                url_map = {}
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    results = list(pool.map(_save_asset, [(i, a, document.id) for i, a in enumerate(limited_assets)]))
+
+                for i, original_url, saved_path, ext, size_bytes in results:
+                    if saved_path and original_url:
+                        file_url = request.build_absolute_uri(default_storage.url(saved_path))
+                        url_map[original_url] = file_url
+                        DocumentAsset.objects.create(
+                            document=document,
+                            name=limited_assets[i].get('name', f'asset_{i}.{ext}'),
+                            file=saved_path,
+                            file_type=f'image/{ext}',
+                            width=limited_assets[i].get('width'),
+                            height=limited_assets[i].get('height'),
+                            size_kb=round(size_bytes / 1024, 1)
+                        )
+                        print(f"✅ Asset {i} sauvegardé: {file_url}")
+
+                # Remplacer les data URLs par les URLs fichiers dans offer_structure (in-place)
+                for section in offer_structure.get('sections', []):
+                    for img in section.get('images', []):
+                        if isinstance(img, dict) and img.get('url') in url_map:
+                            img['url'] = url_map[img['url']]
+
+                # Sauvegarder offer_structure propre (URLs HTTP, pas data URLs)
+                document.offer_structure = offer_structure
+                document.save(update_fields=['offer_structure'])
+
+                # Sauvegarder le PDF original
+                pdf.seek(0)
                 pdf_file_content = ContentFile(pdf.read(), name=f"imported_{document.id}.pdf")
                 document.pdf_file.save(f"imported_{document.id}.pdf", pdf_file_content)
-                
-                print(f"✅ Document automatiquement sauvegardé avec l'ID: {document.id}")
-                
+
+                print(f"✅ Document ID {document.id} sauvegardé avec {len(url_map)} image(s) en fichiers")
+
             except Exception as e:
-                print(f"⚠️ Erreur sauvegarde automatique: {e}")
-                # Ne pas faire échouer l'import si la sauvegarde échoue
+                print(f"⚠️ Erreur sauvegarde: {e}")
+                traceback.print_exc()
 
             return Response({
                 "offer_structure": offer_structure,
-                "assets": assets,
                 "company_info": company_info,
-                "background_url": background_url,
-                "logo_data_url": logo_data_url,
-                "document_id": document.id if 'document' in locals() else None
+                "document_id": document.id if document else None
             })
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             return Response({"error": f"Erreur import PDF: {e}"}, status=500)
 
     def _extract_pdf_content(self, pdf_file):
@@ -3604,8 +3875,12 @@ class PdfToGJSEndpoint(APIView):
             if text and text.strip():
                 chunks.append(text.strip())
 
-            # Images avec améliorations
+            # Images : max 10 au total
+            if len(assets) >= 10:
+                continue
             for img_index, img in enumerate(page.get_images(full=True)):
+                if len(assets) >= 10:
+                    break
                 pix = None
                 try:
                     xref = img[0]
@@ -3669,140 +3944,326 @@ class PdfToGJSEndpoint(APIView):
         md = re.sub(r'\n{3,}', '\n\n', md).strip()
         return md, assets
 
-    def _md_to_offer_json(self, markdown_text, company_info, assets=[]):
-        """Demande à l'IA de mapper le texte → JSON sections normalisées."""
-        # OPTIMISATION: Ne pas inclure les images dans le prompt OpenAI pour accélérer le traitement
-        # Les images seront ajoutées automatiquement après la génération
-        
-        # Limiter la taille du texte pour éviter les timeouts (max ~50000 caractères = ~12500 tokens)
-        max_chars = 50000
-        if len(markdown_text) > max_chars:
-            print(f"⚠️ PDF très long ({len(markdown_text)} caractères), troncature à {max_chars}")
-            markdown_text = markdown_text[:max_chars] + "\n\n[... PDF tronqué, contenu trop long ...]"
-        
-        sys = """Expert en structuration d'offres de voyage. Réponds en JSON strict.
-RÈGLE: Conserve 100% du texte original. Ne résume JAMAIS, structure uniquement."""
-        
-        user = f"""
-Structure cette offre en JSON avec: title, introduction, sections[], cta.
-Sections possibles: Flights, Hotel, Price, Programme, Activities, Transfers, Info.
-Format section: {{"id":"slug","type":"...","title":"...","body":"..."}}
+    # ─────────────────────────────────────────────────────────────
+    # PARSER HEURISTIQUE — 0ms, sans API
+    # ─────────────────────────────────────────────────────────────
+    SECTION_TYPE_MAP = {
+        'Flights':    ['vol ', 'vols', 'flight', 'aéroport', 'airport', 'départ', 'arrivée', 'escale', 'compagnie'],
+        'Hotel':      ['hôtel', 'hotel', 'hébergement', 'chambre', 'nuit', 'logement', 'resort', 'lodge', 'pension'],
+        'Activities': ['activités', 'excursions', 'visites', 'randonnée', 'safari', 'loisirs'],
+        'Price':      ['prix', 'tarif', 'coût', 'forfait', 'budget', 'supplément', 'par personne'],
+        'Programme':  ['programme', 'itinéraire', 'itinerary', 'agenda'],  # Pas "jour 1/2" — ce sont des sous-titres
+        'Transfers':  ['transfert', 'transfer', 'navette', 'shuttle'],
+        'Info':       ['informations pratiques', 'infos pratiques', 'visa', 'assurance', 'formalité', 'documents requis'],
+    }
 
-CRITIQUE: Conserve TOUT le texte (tous les jours, détails, listes). Reformate en markdown propre.
+    # Patterns de sous-titres journaliers (JOUR X, DAY X, etc.) — ne créent PAS de section top-level
+    DAY_HEADING_PATTERNS = [
+        re.compile(r'^jour\s+\d+', re.I),
+        re.compile(r'^day\s+\d+', re.I),
+        re.compile(r'^étape\s+\d+', re.I),
+        re.compile(r'^etape\s+\d+', re.I),
+        re.compile(r'^nuit\s+\d+', re.I),
+        re.compile(r'^semaine\s+\d+', re.I),
+        re.compile(r'^\d+\s*(er|ème|e|eme)?\s+jour', re.I),
+        re.compile(r'^(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b', re.I),
+    ]
 
-Contenu:
-{markdown_text}
+    def _is_day_heading(self, text: str) -> bool:
+        t = text.strip()
+        if len(t) > 120:
+            return False
+        return any(p.search(t) for p in self.DAY_HEADING_PATTERNS)
+
+    def _detect_section_type(self, text: str) -> str:
+        lower = text.lower()
+        for stype, keywords in self.SECTION_TYPE_MAP.items():
+            if any(kw in lower for kw in keywords):
+                return stype
+        return 'Info'
+
+    def _parse_sections_heuristic(self, markdown_text: str):
+        """Parse le markdown du PDF en sections sans appel API. Retourne None si insuffisant."""
+        # Log pour diagnostiquer la structure du PDF
+        print(f"📄 Markdown extrait ({len(markdown_text)} chars) — aperçu:\n{markdown_text[:800]}\n---")
+
+        lines = markdown_text.split('\n')
+        title = 'Votre offre de voyage'
+        intro_lines = []
+        sections = []
+        current = None
+        body_lines = []
+        found_title = False
+
+        def flush_section():
+            if current is not None:
+                current['body'] = '\n'.join(body_lines).strip()
+                sections.append(current)
+
+        def new_section(heading_text):
+            nonlocal current, body_lines
+            flush_section()
+            body_lines = []
+            current = {
+                'id': re.sub(r'\W+', '-', heading_text.lower())[:30].strip('-'),
+                'type': self._detect_section_type(heading_text),
+                'title': heading_text,
+                'body': '',
+                'images': [],
+            }
+
+        for line in lines:
+            s = line.strip()
+            if not s:
+                # Conserver les lignes vides dans le body pour la structure
+                if current is not None:
+                    body_lines.append('')
+                continue
+
+            m1 = re.match(r'^#\s+(.+)$', s)
+            m2 = re.match(r'^#{2,3}\s+(.+)$', s)
+            m4 = re.match(r'^#{4,}\s+(.+)$', s)
+            mb = re.match(r'^\*\*(.+?)\*\*\s*$', s)  # Ligne entièrement bold
+
+            if m1:
+                if not found_title:
+                    # Premier H1 = titre du document
+                    title = m1.group(1)
+                    found_title = True
+                elif self._is_day_heading(m1.group(1)):
+                    # H1 jour/day → auto-créer section "Programme" si besoin, puis sous-titre
+                    if current is None:
+                        new_section("Programme")
+                    body_lines.append(f'### {m1.group(1)}')
+                else:
+                    # H1 suivants = sections principales
+                    new_section(m1.group(1))
+            elif m2:
+                heading = m2.group(1)
+                level = len(re.match(r'^(#+)', s).group(1))
+                if level == 2 and self._is_day_heading(heading):
+                    # H2 jour/day → auto-créer section "Programme" si besoin, puis sous-titre
+                    if current is None:
+                        new_section("Programme")
+                    body_lines.append(f'### {heading}')
+                elif level == 2 and current is not None:
+                    # H2 dans une section existante → sous-titre simple (ex: noms d'hôtels)
+                    body_lines.append(f'### {heading}')
+                elif level == 2:
+                    # H2 sans section courante → nouvelle section
+                    new_section(heading)
+                else:
+                    # H3 = sous-titre dans le body
+                    if current is not None:
+                        body_lines.append(f'## {heading}')
+                    else:
+                        intro_lines.append(s)
+            elif m4:
+                # H4+ = toujours sous-titre
+                if current is not None:
+                    body_lines.append(f'## {m4.group(1)}')
+            elif mb:
+                # Bold line → body ou intro (jamais une nouvelle section)
+                if current is not None:
+                    body_lines.append(s)
+                elif found_title:
+                    intro_lines.append(s)
+            else:
+                # Texte plain : détecter JOUR X / DAY X non-marqués (ex: "JOUR 10 (06/08) : RIO...")
+                # Patterns stricts pour éviter les faux positifs
+                if re.match(r'^(jour|day)\s+\d+', s, re.I):
+                    if current is None:
+                        new_section("Programme")
+                    body_lines.append(f'### {s}')
+                elif current is not None:
+                    body_lines.append(s)
+                elif found_title:
+                    intro_lines.append(s)
+
+        flush_section()
+
+        # Retourner None si trop peu de sections → fallback OpenAI
+        if len(sections) < 2:
+            print(f"⚠️ Heuristique: {len(sections)} section(s) seulement — fallback OpenAI")
+            return None
+
+        print(f"✅ Heuristique: {len(sections)} sections, titre='{title}'")
+        return {
+            'title': title,
+            'introduction': '\n'.join(intro_lines).strip(),  # Pas de limite sur l'intro
+            'sections': sections,
+            'cta': {'title': 'Réservez maintenant', 'description': '', 'buttonText': 'Réserver'},
+        }
+
+    # ─────────────────────────────────────────────────────────────
+    # DISTRIBUTION DES IMAGES — une par section, sans doublons
+    # ─────────────────────────────────────────────────────────────
+    def _distribute_images(self, offer_structure: dict, assets: list):
         """
+        Distribue TOUTES les images extraites du PDF (max 8) dans les sections.
+        - Passage 1 : 1 image par section (round-robin)
+        - Passage 2 : les images restantes vont dans les premières sections (max 2 par section)
+        Objectif : utiliser 4-5 images visibles minimum.
+        """
+        if not assets:
+            return
+
+        sections = offer_structure.get('sections', [])
+        if not sections:
+            return
+
+        pool = list(assets)
+
+        # Passage 1 : une image par section
+        for section in sections:
+            if not pool:
+                break
+            section.setdefault('images', [])
+            if not section['images']:
+                asset = pool.pop(0)
+                section['images'].append({
+                    'url': asset['data_url'],
+                    'alt': asset.get('name', ''),
+                    'caption': '',
+                })
+
+        # Passage 2 : distribuer les images restantes (max 2 par section au total)
+        for section in sections:
+            if not pool:
+                break
+            if len(section.get('images', [])) < 2:
+                asset = pool.pop(0)
+                section['images'].append({
+                    'url': asset['data_url'],
+                    'alt': asset.get('name', ''),
+                    'caption': '',
+                })
+
+        print(f"🖼️ {len(assets) - len(pool)}/{len(assets)} images distribuées dans {len(sections)} sections")
+
+    # ─────────────────────────────────────────────────────────────
+    # FALLBACK OPENAI — structure seulement (~200 tokens, ~8s)
+    # ─────────────────────────────────────────────────────────────
+    def _md_to_offer_json(self, markdown_text: str, company_info: dict):
+        """
+        Étape 1 : OpenAI identifie juste le titre et les sections (pas le body) → ~200 tokens.
+        Étape 2 : on découpe le texte original autour des titres détectés → 0ms.
+        """
+        # Envoyer seulement les 6000 premiers chars pour identifier la structure
+        sample = markdown_text[:6000]
+
+        sys_prompt = "Tu es un expert en offres de voyage. Réponds uniquement en JSON valide."
+        user_prompt = f"""Analyse ce document de voyage et retourne UNIQUEMENT:
+{{
+  "title": "titre principal du document",
+  "sections": [
+    {{"title": "titre exact de la section tel qu'il apparaît dans le texte", "type": "Flights|Hotel|Price|Programme|Activities|Transfers|Info"}}
+  ]
+}}
+
+Identifie toutes les sections principales. NE reproduis PAS le contenu, juste les titres.
+
+Document:
+{sample}"""
+
         try:
             res = get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
-                temperature=0.1,  # Plus bas pour plus de fidélité au texte original
-                timeout=110,  # Timeout de 110 secondes (marge avant worker timeout à 120s)
-                max_tokens=10000,  # Augmenté pour PDFs complexes
-                # gpt-4o-mini est très économique: ~$0.15/$0.60 par 1M tokens (entrée/sortie)
+                temperature=0,
+                timeout=30,
+                max_tokens=500,  # Juste les titres → très rapide
                 messages=[
-                    {"role": "system", "content": sys},
-                    {"role": "user", "content": user}
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt},
                 ]
             )
         except Exception as e:
-            print(f"❌ Erreur OpenAI API: {e}")
-            # Ne PAS retourner de structure - lever l'exception pour éviter de sauvegarder un document vide
-            raise Exception(f"Échec du traitement OpenAI: {str(e)}")
+            raise Exception(f"Échec OpenAI: {e}")
+
         raw = res.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```json")[-1].split("```")[0]
-        data = json.loads(raw)
 
-        # sécurité: clés minimales
-        data.setdefault("title", "Votre offre de voyage")
-        data.setdefault("introduction", "")
-        data.setdefault("sections", [])
-        data.setdefault("cta", {"title":"Réservez maintenant","description":"","buttonText":"Réserver"})
+        try:
+            structure = json.loads(raw)
+        except json.JSONDecodeError:
+            raise Exception(f"JSON OpenAI invalide: {raw[:200]}")
 
-        # Post-traitement: enrichir les sections avec les images extraites du PDF
-        if assets and len(assets) > 0:
-            print(f"🖼️ Enrichissement des sections avec {len(assets)} image(s) extraite(s) du PDF...")
-            # Créer un mapping des images disponibles
-            images_by_type = {
-                'flights': [],  # Images d'avions/aéroports
-                'hotel': [],    # Images d'hôtels/chambres/piscines
-                'activities': [], # Images d'activités/paysages
-                'other': []     # Autres images
-            }
-            
-            # Classifier les images selon leur nom/page (heuristique simple)
-            for asset in assets:
-                name_lower = asset['name'].lower()
-                # Heuristique basée sur le nom de l'image
-                if any(keyword in name_lower for keyword in ['avion', 'airport', 'aeroport', 'flight', 'vol']):
-                    images_by_type['flights'].append(asset)
-                elif any(keyword in name_lower for keyword in ['hotel', 'chambre', 'room', 'piscine', 'pool', 'spa']):
-                    images_by_type['hotel'].append(asset)
-                elif any(keyword in name_lower for keyword in ['activite', 'activity', 'paysage', 'landscape', 'excursion']):
-                    images_by_type['activities'].append(asset)
-                else:
-                    images_by_type['other'].append(asset)
-            
-            # Enrichir les sections avec les images appropriées
-            for section in data.get("sections", []):
-                section_type = (section.get("type") or "").lower()
-                section_id = (section.get("id") or "").lower()
-                
-                # Vérifier si la section a déjà des images
-                if "images" not in section or not section["images"]:
-                    section["images"] = []
-                
-                # Associer les images selon le type de section
-                images_to_add = []
-                if section_type in ['flights', 'flight', 'transport'] or section_id in ['flights', 'flight']:
-                    images_to_add = images_by_type['flights'][:2]  # Max 2 images par section
-                elif section_type in ['hotel', 'hebergement'] or section_id in ['hotel', 'hebergement']:
-                    images_to_add = images_by_type['hotel'][:2]
-                elif section_type in ['activities', 'activities', 'programme', 'itinerary', 'itineraire'] or section_id in ['activities', 'activities', 'programme', 'itinerary']:
-                    images_to_add = images_by_type['activities'][:2]
-                
-                # Si aucune image spécifique trouvée, utiliser les images "other"
-                if not images_to_add:
-                    images_to_add = images_by_type['other'][:2]
-                
-                # Ajouter les images à la section (format pour Puck editor)
-                for asset in images_to_add:
-                    # Vérifier que l'image n'est pas déjà dans la section
-                    if not any(img.get("url") == asset["data_url"] for img in section["images"]):
-                        section["images"].append({
-                            "url": asset["data_url"],
-                            "alt": asset.get("name", "Image du PDF"),
-                            "caption": f"Image extraite de la page {asset.get('page', '?')} du PDF"
-                        })
-            
-            # Si certaines images n'ont pas été associées, les placer dans une section générale
-            all_used_images = []
-            for section in data.get("sections", []):
-                for img in section.get("images", []):
-                    if img.get("url"):
-                        all_used_images.append(img["url"])
-            
-            unused_images = [asset for asset in assets if asset["data_url"] not in all_used_images]
-            if unused_images:
-                print(f"  ⚠️ {len(unused_images)} image(s) non associée(s), ajout dans les sections...")
-                # Ajouter dans les sections qui n'ont pas déjà trop d'images
-                remaining_unused = list(unused_images)
-                for section in data.get("sections", []):
-                    if len(section.get("images", [])) < 3 and remaining_unused:
-                        for asset in remaining_unused[:3]:
-                            section.setdefault("images", []).append({
-                                "url": asset["data_url"],
-                                "alt": asset.get("name", "Image du PDF"),
-                                "caption": f"Image extraite de la page {asset.get('page', '?')} du PDF"
-                            })
-                        remaining_unused = remaining_unused[3:]
-                    if not remaining_unused:
-                        break
-            
-            print(f"✅ Enrichissement terminé - images intégrées dans les sections")
+        doc_title = structure.get("title", "Votre offre de voyage")
+        section_defs = structure.get("sections", [])
 
-        return data
+        if not section_defs:
+            raise Exception("OpenAI n'a identifié aucune section")
+
+        # Étape 2 : découper le texte original autour des titres détectés
+        sections = self._split_text_by_titles(markdown_text, section_defs)
+
+        print(f"✅ OpenAI structure-only: {len(sections)} sections, titre='{doc_title}'")
+        return {
+            "title": doc_title,
+            "introduction": "",
+            "sections": sections,
+            "cta": {"title": "Réservez maintenant", "description": "", "buttonText": "Réserver"},
+        }
+
+    def _split_text_by_titles(self, text: str, section_defs: list) -> list:
+        """Découpe le texte original autour des titres de sections identifiés par OpenAI."""
+        sections = []
+        remaining = text
+
+        for i, sdef in enumerate(section_defs):
+            title = sdef.get("title", "").strip()
+            if not title:
+                continue
+
+            # Chercher le titre dans le texte (insensible à la casse, ignore les #)
+            pattern = re.escape(title)
+            match = re.search(pattern, remaining, re.IGNORECASE)
+
+            if not match:
+                # Essayer sans accents / avec fuzzy partiel (premiers 30 chars)
+                short = title[:30]
+                match = re.search(re.escape(short), remaining, re.IGNORECASE)
+
+            if match:
+                # Intro = tout ce qui précède la première section
+                if i == 0 and match.start() > 0:
+                    pass  # l'intro est avant la première section
+
+                # Body = du titre jusqu'au prochain titre
+                start = match.start()
+                # Chercher la prochaine section pour délimiter
+                next_match = None
+                if i + 1 < len(section_defs):
+                    next_title = section_defs[i + 1].get("title", "")[:30]
+                    if next_title:
+                        nm = re.search(re.escape(next_title), remaining[start:], re.IGNORECASE)
+                        if nm:
+                            next_match = start + nm.start()
+
+                body_text = remaining[start:next_match] if next_match else remaining[start:]
+                # Enlever la ligne de titre du body
+                body_lines = body_text.split('\n')
+                body_clean = '\n'.join(body_lines[1:]).strip()
+
+                sections.append({
+                    "id": re.sub(r'\W+', '-', title.lower())[:30].strip('-'),
+                    "type": sdef.get("type", "Info"),
+                    "title": title,
+                    "body": body_clean,
+                    "images": [],
+                })
+            else:
+                # Titre non trouvé dans le texte → section vide
+                sections.append({
+                    "id": re.sub(r'\W+', '-', title.lower())[:30].strip('-'),
+                    "type": sdef.get("type", "Info"),
+                    "title": title,
+                    "body": "",
+                    "images": [],
+                })
+
+        return sections
 
 
 class ImproveOfferEndpoint(APIView):
@@ -3859,6 +4320,7 @@ class DocumentListCreateView(ListCreateAPIView):
     GET: Liste tous les documents sauvegardés
     POST: Crée un nouveau document
     """
+    permission_classes = [AllowAny]
     queryset = Document.objects.all()
     
     def get(self, request):
@@ -3879,7 +4341,8 @@ class DocumentListCreateView(ListCreateAPIView):
                 'has_pdf': bool(doc.pdf_file),
                 'has_thumbnail': bool(doc.thumbnail),
                 'company_info': doc.company_info,
-                'assets_count': len(doc.assets) if doc.assets else 0
+                'assets_count': len(doc.assets) if doc.assets else 0,
+                'folder_id': doc.folder_id
             })
         
         return Response(data)
@@ -3897,7 +4360,21 @@ class DocumentListCreateView(ListCreateAPIView):
             offer_structure = request.data.get('offer_structure')
             company_info = request.data.get('company_info', {})
             assets = request.data.get('assets', [])
-            
+            # Données éditeurs
+            puck_data = request.data.get('puck_data')
+            global_background = request.data.get('global_background')
+            header_footer = request.data.get('header_footer')
+            blocknote_data = request.data.get('blocknote_data')
+            folder_id = request.data.get('folder_id')
+
+            # Résoudre le dossier
+            folder = None
+            if folder_id:
+                try:
+                    folder = Folder.objects.get(pk=folder_id)
+                except Folder.DoesNotExist:
+                    pass
+
             # Créer le document
             document = Document.objects.create(
                 title=title,
@@ -3907,7 +4384,12 @@ class DocumentListCreateView(ListCreateAPIView):
                 grapes_css=grapes_css,
                 offer_structure=offer_structure,
                 company_info=company_info,
-                assets=assets
+                assets=assets,
+                puck_data=puck_data,
+                global_background=global_background,
+                header_footer=header_footer,
+                blocknote_data=blocknote_data,
+                folder=folder
             )
             
             # Sauvegarder le PDF si fourni
@@ -3970,6 +4452,7 @@ class DocumentDetailView(RetrieveUpdateDestroyAPIView):
     PUT/PATCH: Met à jour un document
     DELETE: Supprime un document
     """
+    permission_classes = [AllowAny]
     queryset = Document.objects.all()
     
     def get(self, request, pk):
@@ -4015,11 +4498,49 @@ class DocumentDetailView(RetrieveUpdateDestroyAPIView):
         except Exception as e:
             return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    def patch(self, request, pk):
+        """Mise à jour partielle d'un document (ex: déplacement vers un dossier)"""
+        try:
+            document = Document.objects.get(pk=pk)
+
+            if 'folder_id' in request.data:
+                folder_id = request.data.get('folder_id')
+                if folder_id:
+                    try:
+                        document.folder = Folder.objects.get(pk=folder_id)
+                    except Folder.DoesNotExist:
+                        return Response({'error': 'Dossier non trouvé'}, status=status.HTTP_404_NOT_FOUND)
+                else:
+                    document.folder = None
+
+            if 'title' in request.data:
+                document.title = request.data['title']
+
+            if 'blocknote_data' in request.data:
+                document.blocknote_data = request.data['blocknote_data']
+
+            if 'offer_structure' in request.data:
+                document.offer_structure = request.data['offer_structure']
+
+            document.save()
+
+            return Response({
+                'id': document.id,
+                'title': document.title,
+                'folder_id': document.folder_id,
+                'message': 'Document mis à jour'
+            })
+
+        except Document.DoesNotExist:
+            return Response({'error': 'Document non trouvé'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     def put(self, request, pk):
         """Met à jour un document"""
         try:
             document = Document.objects.get(pk=pk)
-            
+
             # Mettre à jour les champs
             document.title = request.data.get('title', document.title)
             document.description = request.data.get('description', document.description)
@@ -4028,7 +4549,7 @@ class DocumentDetailView(RetrieveUpdateDestroyAPIView):
             document.offer_structure = request.data.get('offer_structure', document.offer_structure)
             document.company_info = request.data.get('company_info', document.company_info)
             document.assets = request.data.get('assets', document.assets)
-            
+
             document.save()
             
             return Response({
@@ -4123,6 +4644,7 @@ class FolderListCreateView(ListCreateAPIView):
     GET: Liste tous les dossiers avec leur hiérarchie
     POST: Crée un nouveau dossier
     """
+    permission_classes = [AllowAny]
     queryset = Folder.objects.all()
     
     def get(self, request):
@@ -4168,13 +4690,11 @@ class FolderListCreateView(ListCreateAPIView):
                 except Folder.DoesNotExist:
                     return Response({'error': 'Dossier parent non trouvé'}, status=status.HTTP_404_NOT_FOUND)
             
-            # Créer le dossier
-            folder = Folder.objects.create(
+            # Créer le dossier (get_or_create pour éviter les doublons)
+            folder, _ = Folder.objects.get_or_create(
                 name=name,
-                description=description,
-                color=color,
-                icon=icon,
-                parent=parent
+                parent=parent,
+                defaults=dict(description=description, color=color, icon=icon)
             )
             
             return Response({
@@ -4195,6 +4715,7 @@ class FolderDetailView(RetrieveUpdateDestroyAPIView):
     PUT/PATCH: Met à jour un dossier
     DELETE: Supprime un dossier
     """
+    permission_classes = [AllowAny]
     queryset = Folder.objects.all()
     
     def get(self, request, pk):

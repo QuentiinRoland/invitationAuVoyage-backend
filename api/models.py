@@ -31,6 +31,7 @@ class Folder(models.Model):
         ordering = ['position', 'name']
         verbose_name = "Dossier"
         verbose_name_plural = "Dossiers"
+        unique_together = [('owner', 'name', 'parent')]
     
     def __str__(self):
         if self.parent:
@@ -65,6 +66,7 @@ class Document(models.Model):
         ('pdf_import', 'PDF Importé'),
         ('grapesjs_project', 'Projet GrapesJS'),
         ('puck_project', 'Projet Puck'),
+        ('blocknote', 'Document BlockNote'),
         ('generated_offer', 'Offre Générée'),
     ]
     
@@ -78,6 +80,10 @@ class Document(models.Model):
     
     # Données structurées (JSON)
     offer_structure = models.JSONField(null=True, blank=True, verbose_name="Structure de l'offre")
+    blocknote_data = models.JSONField(null=True, blank=True, verbose_name="Données BlockNote Editor")
+    puck_data = models.JSONField(null=True, blank=True, verbose_name="Données Puck Editor")
+    global_background = models.JSONField(null=True, blank=True, verbose_name="Background global Puck")
+    header_footer = models.JSONField(null=True, blank=True, verbose_name="Header/Footer Puck")
     grapes_html = models.TextField(blank=True, verbose_name="HTML GrapesJS")
     grapes_css = models.TextField(blank=True, verbose_name="CSS GrapesJS")
     

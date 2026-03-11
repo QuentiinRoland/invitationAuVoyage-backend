@@ -3,6 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.shortcuts import get_object_or_404
 from django.db import models
 from .models import Document, Folder, DocumentAsset
@@ -25,27 +26,25 @@ class DocumentListCreateView(ListCreateAPIView):
         return Document.objects.all().order_by('-updated_at')
     
     def create(self, request, *args, **kwargs):
-        """Override pour logger les erreurs de validation"""
-        serializer = self.get_serializer(data=request.data)
-        if not serializer.is_valid():
-            print("❌ VALIDATION FAILED:")
-            print("Errors:", serializer.errors)
-            print("Data:", request.data.keys() if hasattr(request.data, 'keys') else 'Not a dict')
+        """Convertir folder_id → folder avant validation"""
+        if 'folder_id' in request.data:
+            data = request.data.copy()
+            data['folder'] = data.pop('folder_id')
+            request._full_data = data
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        """Associer le document à l'utilisateur connecté si authentifié"""
-        try:
-            if self.request.user.is_authenticated:
-                serializer.save(owner=self.request.user)
-            else:
-                serializer.save()  # Sans owner si pas connecté
-        except Exception as e:
-            import traceback
-            print("❌ ERREUR PERFORM_CREATE:")
-            print(traceback.format_exc())
-            print("Data reçue:", self.request.data)
-            raise
+        """Associer le document à l'utilisateur connecté, dans son dossier personnel"""
+        if self.request.user.is_authenticated:
+            user = self.request.user
+            # Si aucun dossier fourni, mettre dans le dossier personnel de l'utilisateur
+            folder = serializer.validated_data.get('folder')
+            if not folder:
+                display_name = user.first_name or user.username
+                folder = Folder.objects.filter(owner=user, name=f"Dossier de {display_name}").first()
+            serializer.save(owner=user, folder=folder)
+        else:
+            serializer.save()
 
 
 class DocumentDetailView(RetrieveUpdateDestroyAPIView):
@@ -63,6 +62,20 @@ class DocumentDetailView(RetrieveUpdateDestroyAPIView):
             return Document.objects.filter(owner=self.request.user)
         return Document.objects.all()  # Tous les documents si pas connecté
 
+    def patch(self, request, *args, **kwargs):
+        """PATCH avec gestion de folder_id (le frontend envoie folder_id, pas folder)"""
+        # Convertir folder_id → folder pour le serializer DRF
+        data = request.data.copy()
+        if 'folder_id' in data:
+            folder_id = data.pop('folder_id')
+            if hasattr(folder_id, '__iter__') and not isinstance(folder_id, str):
+                folder_id = folder_id[0] if folder_id else None
+            data['folder'] = folder_id
+
+        # Remplacer request.data par notre version modifiée
+        request._full_data = data
+        return super().patch(request, *args, **kwargs)
+
 
 class FolderListCreateView(ListCreateAPIView):
     """
@@ -76,8 +89,17 @@ class FolderListCreateView(ListCreateAPIView):
         """Filtrer les dossiers par utilisateur connecté"""
         return Folder.objects.filter(owner=self.request.user).order_by('position', 'name')
 
+    def create(self, request, *args, **kwargs):
+        """Créer ou retourner le dossier existant (idempotent)"""
+        name = request.data.get('name', '')
+        parent = request.data.get('parent', None)
+        existing = Folder.objects.filter(owner=request.user, name=name, parent=parent).first()
+        if existing:
+            serializer = self.get_serializer(existing)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
-        """Associer le dossier à l'utilisateur connecté"""
         serializer.save(owner=self.request.user)
 
 
@@ -163,12 +185,39 @@ class DocumentsWithoutFolderView(APIView):
     GET: Récupère tous les documents qui ne sont dans aucun dossier
     """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         """Retourne les documents sans dossier"""
         documents = Document.objects.filter(folder=None, owner=request.user).order_by('-updated_at')
         serializer = DocumentSerializer(documents, many=True, context={'request': request})
-        
+
         return Response({
             'documents': serializer.data
         })
+
+
+class UploadImageView(APIView):
+    """
+    POST: Upload une image et retourne son URL publique
+    """
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        import os
+        import uuid
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        file = request.FILES.get('file')
+        if not file:
+            return Response({'error': 'Aucun fichier fourni'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not file.content_type.startswith('image/'):
+            return Response({'error': 'Le fichier doit être une image'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ext = os.path.splitext(file.name)[1] or '.jpg'
+        filename = f"editor/images/{uuid.uuid4().hex}{ext}"
+        saved_path = default_storage.save(filename, ContentFile(file.read()))
+        url = request.build_absolute_uri(default_storage.url(saved_path))
+        return Response({'url': url}, status=status.HTTP_201_CREATED)
