@@ -93,6 +93,9 @@ class FolderSerializer(serializers.ModelSerializer):
     total_documents_count = serializers.ReadOnlyField()
     full_path = serializers.ReadOnlyField()
     owner = serializers.StringRelatedField(read_only=True)
+    parent = serializers.PrimaryKeyRelatedField(
+        queryset=Folder.objects.all(), allow_null=True, required=False
+    )
 
     class Meta:
         model = Folder
