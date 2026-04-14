@@ -18,19 +18,15 @@ class AmadeusFlightService:
     BASE_URL_PROD = "https://api.amadeus.com"
     BASE_URL_TEST = "https://test.api.amadeus.com"
 
-    # Token mis en cache au niveau classe pour survivre entre les requêtes HTTP
-    _class_token = None
-    _class_token_expiry = None
+    # Token mis en cache par environnement (test / prod) pour survivre entre les requêtes HTTP
+    _class_tokens: dict = {}          # clé : 'test' ou 'prod'
+    _class_token_expiries: dict = {}  # clé : 'test' ou 'prod'
     _token_lock = threading.Lock()
 
     def __init__(self, use_test=True):
-        """
-        Initialise le service Amadeus
-
-        Args:
-            use_test: Si True, utilise l'environnement de test (recommandé pour dev)
-        """
+        self.use_test = use_test
         self.base_url = self.BASE_URL_TEST if use_test else self.BASE_URL_PROD
+        self._env_key = 'test' if use_test else 'prod'
         self.api_key = getattr(settings, 'AMADEUS_API_KEY', None)
         self.api_secret = getattr(settings, 'AMADEUS_API_SECRET', None)
 
@@ -40,23 +36,23 @@ class AmadeusFlightService:
     def _get_access_token(self):
         """
         Obtient un token d'accès OAuth2 depuis Amadeus.
-        Le token est mis en cache au niveau classe et réutilisé jusqu'à expiration.
+        Le token est mis en cache par environnement (test / prod).
         """
+        env = self._env_key
         with AmadeusFlightService._token_lock:
-            if AmadeusFlightService._class_token and AmadeusFlightService._class_token_expiry:
-                if datetime.now() < AmadeusFlightService._class_token_expiry:
-                    return AmadeusFlightService._class_token
+            cached = AmadeusFlightService._class_tokens.get(env)
+            expiry = AmadeusFlightService._class_token_expiries.get(env)
+            if cached and expiry and datetime.now() < expiry:
+                return cached
 
-            print("🔐 Obtention d'un nouveau token Amadeus...")
+            print(f"🔐 Obtention d'un nouveau token Amadeus ({env})...")
 
             url = f"{self.base_url}/v1/security/oauth2/token"
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
             data = {
                 "grant_type": "client_credentials",
                 "client_id": self.api_key,
-                "client_secret": self.api_secret
+                "client_secret": self.api_secret,
             }
 
             try:
@@ -64,18 +60,18 @@ class AmadeusFlightService:
                 response.raise_for_status()
 
                 token_data = response.json()
-                AmadeusFlightService._class_token = token_data['access_token']
-
-                # Le token expire généralement après 1799 secondes (30 min)
-                # On le considère expiré 5 minutes avant pour être sûr
+                token = token_data['access_token']
                 expires_in = token_data.get('expires_in', 1799)
-                AmadeusFlightService._class_token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
+                new_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
 
-                print(f"✅ Token obtenu, valide jusqu'à {AmadeusFlightService._class_token_expiry.strftime('%H:%M:%S')}")
-                return AmadeusFlightService._class_token
+                AmadeusFlightService._class_tokens[env] = token
+                AmadeusFlightService._class_token_expiries[env] = new_expiry
+
+                print(f"✅ Token {env} obtenu, valide jusqu'à {new_expiry.strftime('%H:%M:%S')}")
+                return token
 
             except requests.exceptions.RequestException as e:
-                print(f"❌ Erreur lors de l'obtention du token: {str(e)}")
+                print(f"❌ Erreur lors de l'obtention du token ({env}): {str(e)}")
                 raise
     
     def get_flight_by_number(self, flight_number, departure_date, max_days_offset=3):
@@ -599,6 +595,36 @@ class AmadeusFlightService:
                     'duration': seg_duration,
                 })
 
+            # Stopovers structurés avec durée de correspondance
+            stopovers_structured = []
+            for i in range(1, len(flight_points) - 1):
+                via_iata = flight_points[i].get('iataCode', '')
+                via_arr_timings = (flight_points[i].get('arrival', {}).get('timings', [{}]) or [{}])[0]
+                via_dep_timings = (flight_points[i].get('departure', {}).get('timings', [{}]) or [{}])[0]
+                via_arr_time = via_arr_timings.get('value', '')
+                via_dep_time = via_dep_timings.get('value', '')
+
+                layover_duration = None
+                if via_arr_time and via_dep_time:
+                    try:
+                        t1 = datetime.fromisoformat(via_arr_time.replace('Z', '+00:00'))
+                        t2 = datetime.fromisoformat(via_dep_time.replace('Z', '+00:00'))
+                        delta = t2 - t1
+                        h = int(delta.total_seconds() // 3600)
+                        m = int((delta.total_seconds() % 3600) // 60)
+                        layover_duration = f"{h}h{m:02d}"
+                    except:
+                        pass
+
+                stopovers_structured.append({
+                    'airport': via_iata,
+                    'city': '',  # enrichi par iata_to_city() dans flight_scraper.py
+                    'layover_duration': layover_duration or '',
+                    'arrival_time': format_time(via_arr_time),
+                    'departure_time': format_time(via_dep_time),
+                    'terminal': (flight_points[i].get('departure', {}).get('terminal', {}) or {}).get('code', ''),
+                })
+
             return {
                 'flight_number': f"{carrier_code}{flight_num}",
                 'carrier_code': carrier_code,
@@ -615,6 +641,7 @@ class AmadeusFlightService:
                 'gate_departure': departure_gate,
                 'gate_arrival': arrival_gate,
                 'stops': stops_count,
+                'stopovers': stopovers_structured,
                 'status': flight_status,
                 'segments': segments_detail if len(segments_detail) > 1 else None,
                 'source': 'amadeus_flight_status'
@@ -689,6 +716,33 @@ class AmadeusFlightService:
                 except:
                     return iso_datetime
             
+            # Stopovers structurés (un par segment intermédiaire)
+            stopovers_structured = []
+            for i in range(len(segments) - 1):
+                seg = segments[i]
+                next_seg = segments[i + 1]
+                via_iata = seg.get('arrival', {}).get('iataCode', '')
+                via_arr_time = seg.get('arrival', {}).get('at', '')
+                via_dep_time = next_seg.get('departure', {}).get('at', '')
+                layover_duration = None
+                if via_arr_time and via_dep_time:
+                    try:
+                        t1 = datetime.fromisoformat(via_arr_time.replace('Z', '+00:00'))
+                        t2 = datetime.fromisoformat(via_dep_time.replace('Z', '+00:00'))
+                        delta = t2 - t1
+                        h = int(delta.total_seconds() // 3600)
+                        m = int((delta.total_seconds() % 3600) // 60)
+                        layover_duration = f"{h}h{m:02d}"
+                    except Exception:
+                        pass
+                stopovers_structured.append({
+                    'airport': via_iata,
+                    'city': '',  # enrichi par iata_to_city() dans flight_scraper.py
+                    'layover_duration': layover_duration or '',
+                    'arrival_time': format_time(via_arr_time),
+                    'departure_time': format_time(via_dep_time),
+                })
+
             return {
                 'flight_number': f"{carrier_code}{flight_number}" if carrier_code and flight_number else 'N/A',
                 'carrier_code': carrier_code,
@@ -700,6 +754,7 @@ class AmadeusFlightService:
                 'arrival_datetime_full': arrival_time,
                 'duration': duration_formatted,
                 'stops': len(segments) - 1,
+                'stopovers': stopovers_structured,
                 'price': total_price,
                 'currency': currency,
                 'source': 'amadeus_flight_offers'

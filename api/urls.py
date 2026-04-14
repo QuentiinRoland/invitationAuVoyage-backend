@@ -1,7 +1,8 @@
 from django.urls import path
 from .views import (
     APIRootView, TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint,
-    ImproveOfferEndpoint, DocumentGeneratePDFView, PDFOfferGenerator, FreepikImageSearchView
+    ImproveOfferEndpoint, DocumentGeneratePDFView, PDFOfferGenerator, FreepikImageSearchView,
+    UrlPreviewView, HotelGoogleSearchView, ImageSearchView
 )
 from .auth_views import (
     RegisterView, LoginView, LogoutView, ProfileView, ChangePasswordView, CheckAuthView,
@@ -53,4 +54,13 @@ urlpatterns = [
 
     # Proxy Freepik API (public - pas besoin d'authentification)
     path("freepik/search/", FreepikImageSearchView.as_view(), name="freepik-search"),
+
+    # Prévisualisation d'URL (galerie d'images scrapées)
+    path("preview-url/", UrlPreviewView.as_view(), name="preview-url"),
+
+    # Recherche hôtel via Google Places API
+    path("hotel-google-search/", HotelGoogleSearchView.as_view(), name="hotel-google-search"),
+
+    # Recherche d'images (Unsplash / Freepik)
+    path("search-images/", ImageSearchView.as_view(), name="search-images"),
 ]

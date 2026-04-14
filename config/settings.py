@@ -65,6 +65,9 @@ AMADEUS_API_KEY = os.getenv("AMADEUS_API_KEY")
 AMADEUS_API_SECRET = os.getenv("AMADEUS_API_SECRET")
 AMADEUS_USE_TEST = os.getenv("AMADEUS_USE_TEST", "True").lower() == "true"
 
+# Duffel API (recherche & réservation de vols — remplace Amadeus Self-Service)
+DUFFEL_API_KEY = os.getenv("DUFFEL_API_KEY")
+
 # APIs d'images
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 BING_IMAGE_SUBSCRIPTION_KEY = os.getenv("BING_IMAGE_SUBSCRIPTION_KEY")
@@ -72,7 +75,14 @@ BING_IMAGE_SUBSCRIPTION_KEY = os.getenv("BING_IMAGE_SUBSCRIPTION_KEY")
 # Freepik API (millions d'images professionnelles - RECOMMANDÉ)
 # Obtenez votre clé sur https://www.freepik.com/api
 FREEPIK_API_KEY = os.getenv("FREEPIK_API_KEY", "FPSXdbb31bca84c6e7f77a957daa99cbd3b6")
+
+# Google Places API (recherche hôtels depuis URL)
+# Obtenez votre clé sur https://console.cloud.google.com → APIs → Places API
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 FREEPIK_WEBHOOK = os.getenv("FREEPIK_WEBHOOK", "549c5f5082dd8b6cce87aee831c616a9")
+
+# AeroDataBox via RapidAPI (horaires vols toutes dates)
+AERODATABOX_API_KEY = os.getenv("AERODATABOX_API_KEY")
 
 # Application definition
 INSTALLED_APPS = [
