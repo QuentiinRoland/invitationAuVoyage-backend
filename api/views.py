@@ -2793,52 +2793,91 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
 
     def post(self, request):
         text_input = request.data.get("text")
-        offer_type = request.data.get("offer_type", "circuit")  # Par défaut circuit
-        flight_input = request.data.get("flight_input")  # Ancien champ texte libre (compatibilité)
+        offer_type = request.data.get("offer_type", "sejour")
+        flight_input = request.data.get("flight_input")  # legacy
         company_info = request.data.get("company_info", {})
-        website_urls = request.data.get("website_urls", [])  # ✅ Liste d'URLs de sites à scraper
-        example_templates = request.data.get("example_templates", [])  # ✅ Exemples de templates
+        website_urls = request.data.get("website_urls", [])
+        example_templates = request.data.get("example_templates", [])
+        keywords = request.data.get("keywords", [])
+        hotel_google_images = request.data.get("hotel_google_images", [])
 
-        # Nouveaux champs structurés pour la recherche Flight Status Amadeus
-        outbound_flight_number = request.data.get("outbound_flight_number")  # Ex: "AF001"
-        outbound_date = request.data.get("outbound_date")  # Ex: "2025-11-18"
-        outbound_cabin_class = request.data.get("outbound_cabin_class", "eco")  # eco/premium_eco/business
-        outbound_escales = request.data.get("outbound_escales", [])  # [{flightNumber, date}, ...]
-        return_flight_number = request.data.get("return_flight_number")  # Ex: "AF002" (optionnel)
-        return_flight_date = request.data.get("return_flight_date")  # Ex: "2025-11-27" (optionnel)
+        # ── Nouveaux champs v2 ────────────────────────────────────────────────
+        manual_flights_only = request.data.get("manual_flights_only", False)
+        destinations = request.data.get("destinations", []) or []
+        logements = request.data.get("logements", []) or []
+        dates_texte = request.data.get("dates", "") or ""
+        repas = request.data.get("repas", "") or ""
+        transfert_type = request.data.get("transfert", "") or ""
+        croisiere = request.data.get("croisiere", "") or ""
+        type_chambre = request.data.get("type_chambre", "") or ""
+        formalites = request.data.get("formalites", "") or ""
+        outbound_flight_manual = request.data.get("outbound_flight", {}) or {}
+        return_flight_manual = request.data.get("return_flight", {}) or {}
+
+        # Legacy flight fields (compatibilité avec ancien formulaire)
+        outbound_flight_number = request.data.get("outbound_flight_number")
+        outbound_date = request.data.get("outbound_date")
+        outbound_cabin_class = request.data.get("outbound_cabin_class", "eco")
+        outbound_escales = request.data.get("outbound_escales", [])
+        return_flight_number = request.data.get("return_flight_number")
+        return_flight_date = request.data.get("return_flight_date")
         return_cabin_class = request.data.get("return_cabin_class", "eco")
         return_escales = request.data.get("return_escales", [])
-        keywords = request.data.get("keywords", [])  # Mots-clés extraits de la description
-        # Route manuelle saisie par l'utilisateur (prioritaire sur le scraping si renseignée)
         outbound_route = request.data.get("outbound_route", {}) or {}
         return_route = request.data.get("return_route", {}) or {}
-        print(f"   - outbound_route reçu: {outbound_route}")
-        print(f"   - return_route reçu:   {return_route}")
-        hotel_google_images = request.data.get("hotel_google_images", [])  # Photos Google Places
 
-        # Les champs origin, destination, travel_date, return_date pour compatibilité legacy
+        # Si les nouveaux champs de vol manuel sont utilisés, les faire correspondre aux anciens
+        if outbound_flight_manual and not outbound_flight_number:
+            outbound_flight_number = outbound_flight_manual.get("flight_number", "")
+            outbound_date = outbound_flight_manual.get("date", "")
+            outbound_cabin_class = outbound_flight_manual.get("cabin_class", "eco")
+            outbound_route = {
+                'depCity': outbound_flight_manual.get("dep_city", ""),
+                'arrCity': outbound_flight_manual.get("arr_city", ""),
+            }
+        if return_flight_manual and not return_flight_number:
+            return_flight_number = return_flight_manual.get("flight_number", "")
+            return_flight_date = return_flight_manual.get("date", "")
+            return_cabin_class = return_flight_manual.get("cabin_class", "eco")
+            return_route = {
+                'depCity': return_flight_manual.get("dep_city", ""),
+                'arrCity': return_flight_manual.get("arr_city", ""),
+            }
+
+        # Legacy
         origin = request.data.get("origin", "Paris")
         destination = request.data.get("destination")
         travel_date = request.data.get("travel_date")
         return_date = request.data.get("return_date")
 
+        # Construire un text_input depuis les nouveaux champs si absent
+        if not text_input:
+            parts = []
+            if destinations:
+                parts.append(f"Destination(s) : {', '.join(d for d in destinations if d.strip())}")
+            if dates_texte:
+                parts.append(f"Dates : {dates_texte}")
+            if logements:
+                parts.append(f"Logement(s) : {', '.join(l for l in logements if l.strip())}")
+            if parts:
+                text_input = " — ".join(parts)
+
         print(f"📥 Requête reçue:")
         print(f"   - offer_type: {offer_type}")
+        print(f"   - destinations: {destinations}")
+        print(f"   - dates: {dates_texte}")
+        print(f"   - manual_flights_only: {manual_flights_only}")
         print(f"   - outbound_flight: {outbound_flight_number} / {outbound_date}")
-        print(f"   - return_flight: {return_flight_number} / {return_flight_date}")
-        print(f"   - flight_input (legacy): {flight_input[:100] if flight_input else 'Non fourni'}")
         print(f"   - text_input longueur: {len(text_input) if text_input else 0} caractères")
 
-        # Validation : soit text_input, soit vol structuré (numéro + date), soit flight_input
         has_structured_flight = bool(outbound_flight_number and outbound_date)
-        if not text_input and not has_structured_flight and not flight_input:
-            return Response({"error": "Texte ou infos de vol requis (numéro de vol + date)"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Si seulement le vol est fourni, créer un text_input minimal
+        if not text_input and not has_structured_flight and not flight_input:
+            return Response({"error": "Veuillez fournir une destination ou une description."}, status=status.HTTP_400_BAD_REQUEST)
+
         if not text_input and (has_structured_flight or flight_input):
             vol_desc = f"vol {outbound_flight_number} du {outbound_date}" if has_structured_flight else flight_input
             text_input = f"Demande de devis pour le(s) vol(s) suivant(s) : {vol_desc}"
-            print(f"   ℹ️ Texte auto-généré depuis les infos de vol")
         
         try:
             # Récupérer les descriptions des sites web si des URLs sont fournies
@@ -2879,21 +2918,67 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
             elif default_templates:
                 print(f"✅ Utilisation du template par défaut uniquement")
             
-            # Recherche de VRAIS vols avec Amadeus Flight Status API
             real_flights_data = None
-            real_time_search_results = None  # TOUJOURS None - Tavily désactivé
+            real_time_search_results = None
             search_metadata = {}
 
-            print("=" * 80)
-            print("🔍 DÉBUT RECHERCHE DE VOLS - AMADEUS FLIGHT STATUS API")
-            print("=" * 80)
-            print(f"   - Vol aller: {outbound_flight_number} / {outbound_date}")
-            print(f"   - Vol retour: {return_flight_number} / {return_flight_date}")
-            print(f"   - flight_input legacy: {bool(flight_input)}")
-            print()
+            # ── MODE MANUEL : vols saisis à la main, pas de recherche Amadeus ──
+            if manual_flights_only:
+                print("✈️ Mode MANUEL — vols directs depuis le formulaire (pas de recherche Amadeus)")
+                manual_collected = []
 
-            # MODE 1 : Nouveaux champs structurés (numéro de vol + date) — web scraping
-            if has_structured_flight:
+                def _build_manual_flight(fd: dict, leg: str) -> dict:
+                    cabin_labels = {"eco": "Économique", "premium_eco": "Premium Économique", "business": "Business"}
+                    carrier = fd.get("flight_number", "")[:2].upper() if fd.get("flight_number") else ""
+                    return {
+                        'flight_number': fd.get("flight_number", "").upper() or f"Vol {leg}",
+                        'carrier_code': carrier,
+                        'airline': carrier,
+                        'departure_airport': "",
+                        'departure_city': fd.get("dep_city", "") or (outbound_route.get("depCity", "") if leg == "aller" else return_route.get("depCity", "")),
+                        'departure_country': "",
+                        'departure_time': fd.get("dep_time", ""),
+                        'arrival_airport': "",
+                        'arrival_city': fd.get("arr_city", "") or (outbound_route.get("arrCity", "") if leg == "aller" else return_route.get("arrCity", "")),
+                        'arrival_country': "",
+                        'arrival_time': fd.get("arr_time", ""),
+                        'duration': fd.get("duration", ""),
+                        'cabin_class': fd.get("cabin_class", "eco"),
+                        'cabin_label': cabin_labels.get(fd.get("cabin_class", "eco"), "Économique"),
+                        'stops': 0,
+                        'stopovers': [],
+                        'source': 'manual',
+                        'leg': leg,
+                        'not_found': False,
+                        'airline_logo_url': f"https://www.gstatic.com/flights/airline_logos/70px/{carrier}.png" if carrier else "",
+                    }
+
+                if outbound_flight_manual:
+                    manual_collected.append(_build_manual_flight(outbound_flight_manual, "aller"))
+                elif outbound_flight_number:
+                    manual_collected.append(_build_manual_flight({
+                        'flight_number': outbound_flight_number,
+                        'dep_city': outbound_route.get('depCity', ''),
+                        'arr_city': outbound_route.get('arrCity', ''),
+                        'cabin_class': outbound_cabin_class,
+                    }, "aller"))
+
+                if return_flight_manual:
+                    manual_collected.append(_build_manual_flight(return_flight_manual, "retour"))
+                elif return_flight_number:
+                    manual_collected.append(_build_manual_flight({
+                        'flight_number': return_flight_number,
+                        'dep_city': return_route.get('depCity', ''),
+                        'arr_city': return_route.get('arrCity', ''),
+                        'cabin_class': return_cabin_class,
+                    }, "retour"))
+
+                if manual_collected:
+                    real_flights_data = manual_collected
+                    print(f"   ✅ {len(manual_collected)} vol(s) manuel(s) chargé(s)")
+
+            # MODE AMADEUS : recherche via l'API (mode legacy / recherche Amadeus)
+            elif has_structured_flight:
                 print(f"✈️ Mode FLIGHT STATUS - Recherche par web scraping (FlightAware / AirFrance / MisterFly)")
                 from api.flight_scraper import FlightWebScraper, iata_to_city
                 from api.airline_services import format_airline_services_for_prompt
@@ -3384,15 +3469,36 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
             if real_flights_context:
                 print(f"   - Longueur real_flights_context: {len(real_flights_context)} caractères")
             
-            if offer_type == "circuit":
-                prompt = self._get_prompt_circuit(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
-            elif offer_type == "sejour":
-                prompt = self._get_prompt_sejour(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
-            elif offer_type == "transport":
+            # Sélectionner le prompt — séjour par défaut (pas de circuit automatique)
+            if offer_type == "transport":
                 prompt = self._get_prompt_transport(text_input, website_descriptions, processed_templates, None, travel_date, return_date, real_flights_context, offer_type, keywords=keywords, outbound_cabin_class=outbound_cabin_class, return_cabin_class=return_cabin_class, outbound_escales=outbound_escales, return_escales=return_escales)
             else:
-                # Par défaut, utiliser circuit
-                prompt = self._get_prompt_circuit(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)  # None pour Tavily
+                # "sejour" ou inconnu → prompt séjour (JAMAIS circuit automatique)
+                prompt = self._get_prompt_sejour(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)
+
+            # ── Contexte des nouveaux champs (v2) ─────────────────────────────
+            structured_ctx = ""
+            if destinations:
+                dest_str = ", ".join(d for d in destinations if d.strip())
+                structured_ctx += f"\n🌍 DESTINATION(S) : {dest_str}"
+            if dates_texte:
+                structured_ctx += f"\n📅 DATES DU SÉJOUR : {dates_texte}"
+            if logements:
+                log_str = ", ".join(l for l in logements if l.strip())
+                structured_ctx += f"\n🏨 LOGEMENT(S) : {log_str}"
+            if type_chambre:
+                structured_ctx += f"\n🛏️ TYPE DE CHAMBRE : {type_chambre}"
+            repas_labels = {'demi-pension': 'Demi-pension', 'pension-complete': 'Pension complète', 'petit-dejeuner': 'Petit-déjeuner inclus', 'tout-inclus': 'Tout inclus'}
+            if repas:
+                structured_ctx += f"\n🍽️ REPAS : {repas_labels.get(repas, repas)}"
+            transfert_labels = {'prive': 'Transfert privé', 'regroupe': 'Transfert regroupé'}
+            if transfert_type:
+                structured_ctx += f"\n🚐 TRANSFERT : {transfert_labels.get(transfert_type, transfert_type)}"
+            if croisiere:
+                structured_ctx += f"\n🚢 CROISIÈRE : {croisiere}"
+            if structured_ctx:
+                structured_ctx = "\n\n📋 INFORMATIONS STRUCTURÉES DU SÉJOUR (à utiliser EXACTEMENT dans l'offre) :" + structured_ctx + "\n🚨 Utilise ces informations telles quelles dans les sections correspondantes. Ne les invente PAS.\n"
+                prompt = structured_ctx + "\n" + prompt
 
             # Ajouter les mots-clés et infos cabine au prompt
             if keywords:
@@ -3490,6 +3596,21 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                             "hint": "Le JSON généré par OpenAI contient des erreurs de format. Veuillez réessayer."
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
+            # ── Injecter section Formalités si fournie ────────────────────────
+            if formalites and formalites.strip() and isinstance(offer_structure, dict):
+                sections = offer_structure.get('sections', [])
+                formalites_section = {
+                    'id': 'formalites',
+                    'type': 'Info',
+                    'title': 'Formalités',
+                    'body': formalites.strip(),
+                    'images': [],
+                }
+                # Ajouter avant le CTA (à la fin des sections)
+                sections.append(formalites_section)
+                offer_structure['sections'] = sections
+                print(f"   ✅ Section Formalités injectée")
+
             # Préparer les métadonnées de traçabilité
             airfrance_klm_used = search_metadata.get('source') == 'airfrance_klm'
             airfrance_klm_flights_count = search_metadata.get('real_flights_count', 0)
