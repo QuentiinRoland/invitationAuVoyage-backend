@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     APIRootView, TravelOfferGenerator, GrapesJSPDFGenerator, PdfToGJSEndpoint,
     ImproveOfferEndpoint, DocumentGeneratePDFView, PDFOfferGenerator, FreepikImageSearchView,
-    UrlPreviewView, HotelGoogleSearchView, ImageSearchView
+    UrlPreviewView, HotelGoogleSearchView, ImageSearchView, WebSearchView
 )
 from .auth_views import (
     RegisterView, LoginView, LogoutView, ProfileView, ChangePasswordView, CheckAuthView,
@@ -63,4 +63,7 @@ urlpatterns = [
 
     # Recherche d'images (Unsplash / Freepik)
     path("search-images/", ImageSearchView.as_view(), name="search-images"),
+
+    # Recherche web (hôtels / destinations) → URLs à scrapper
+    path("web-search/", WebSearchView.as_view(), name="web-search"),
 ]

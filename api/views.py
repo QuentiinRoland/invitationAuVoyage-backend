@@ -4781,6 +4781,83 @@ class ImageSearchView(APIView):
         })
 
 
+class WebSearchView(APIView):
+    """
+    GET api/web-search/?q=<query>
+    Recherche web (hôtels, destinations) → liste de { title, url, snippet }.
+    Utilise Google CSE si configuré, sinon DuckDuckGo (sans clé).
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from urllib.parse import quote
+        from bs4 import BeautifulSoup as BS4
+
+        query = request.GET.get('q', '').strip()
+        if not query:
+            return Response({'results': []})
+
+        # ── 1. Google Custom Search ────────────────────────────────────────
+        gcs_key = GOOGLE_CSE_KEY or getattr(settings, 'GOOGLE_CSE_API_KEY', '')
+        gcs_cx  = GOOGLE_CSE_CX  or getattr(settings, 'GOOGLE_CSE_CX', '')
+        if gcs_key and gcs_cx:
+            try:
+                r = requests.get(
+                    'https://www.googleapis.com/customsearch/v1',
+                    params={'key': gcs_key, 'cx': gcs_cx, 'q': query, 'num': 8},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    items = r.json().get('items', [])
+                    results = [
+                        {'title': it['title'], 'url': it['link'], 'snippet': it.get('snippet', '')}
+                        for it in items if it.get('link')
+                    ]
+                    if results:
+                        return Response({'results': results, 'source': 'google'})
+            except Exception as e:
+                print(f"WebSearchView Google error: {e}")
+
+        # ── 2. DuckDuckGo HTML (sans clé API) ─────────────────────────────
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.7',
+            }
+            r = requests.get(
+                'https://html.duckduckgo.com/html/',
+                params={'q': query, 'kl': 'fr-fr'},
+                headers=headers,
+                timeout=10,
+            )
+            soup = BS4(r.text, 'html.parser')
+            results = []
+            for item in soup.select('.result')[:8]:
+                title_el = item.select_one('.result__title a')
+                snippet_el = item.select_one('.result__snippet')
+                if not title_el:
+                    continue
+                href = title_el.get('href', '')
+                # DuckDuckGo wraps URLs in redirects — extraire le vrai lien
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(href)
+                uddg = parse_qs(parsed.query).get('uddg', [''])[0]
+                real_url = uddg if uddg.startswith('http') else href
+                if not real_url.startswith('http'):
+                    continue
+                results.append({
+                    'title': title_el.get_text(strip=True),
+                    'url': real_url,
+                    'snippet': snippet_el.get_text(strip=True) if snippet_el else '',
+                })
+            if results:
+                return Response({'results': results, 'source': 'duckduckgo'})
+        except Exception as e:
+            print(f"WebSearchView DDG error: {e}")
+
+        return Response({'results': [], 'error': 'Aucun résultat trouvé'})
+
+
 class PDFOfferGenerator(APIView):
     """
     Génère un PDF à partir d'un texte d'offre
