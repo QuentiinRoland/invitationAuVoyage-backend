@@ -107,6 +107,8 @@ class APIRootView(APIView):
 UNSPLASH_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 BING_KEY = os.getenv("BING_IMAGE_SUBSCRIPTION_KEY")
 PIXABAY_KEY = os.getenv("PIXABAY_API_KEY")
+GOOGLE_CSE_KEY = os.getenv("GOOGLE_CSE_API_KEY")
+GOOGLE_CSE_CX  = os.getenv("GOOGLE_CSE_CX")
 
 # Configuration du cache d'images
 MEDIA_DIR = pathlib.Path("/tmp/offer_images")
@@ -4626,18 +4628,57 @@ class HotelGoogleSearchView(APIView):
 
 class ImageSearchView(APIView):
     """
-    GET api/search-images/?q=<query>&count=<n>
-    Recherche d'images : Pixabay → Unsplash → Freepik (premier qui répond).
+    GET api/search-images/?q=<query>&count=<n>&page=<p>
+    Recherche d'images : Google CSE → Pixabay → Unsplash → Freepik (premier qui répond).
     Retourne { images: [{url, thumb, alt, author, source}], provider, error? }
     """
     permission_classes = [AllowAny]
 
     def get(self, request):
         query = request.GET.get('q', '').strip()
-        count = min(int(request.GET.get('count', 32)), 200)
+        count = min(int(request.GET.get('count', 20)), 200)
         page = max(1, int(request.GET.get('page', 1)))
         if not query:
             return Response({'images': [], 'provider': None})
+
+        # ── 0. Google Custom Search ────────────────────────────────────────
+        gcs_key = GOOGLE_CSE_KEY or getattr(settings, 'GOOGLE_CSE_API_KEY', '')
+        gcs_cx  = GOOGLE_CSE_CX  or getattr(settings, 'GOOGLE_CSE_CX', '')
+        if gcs_key and gcs_cx:
+            try:
+                per_req = min(count, 10)  # Google CSE max 10 par requête
+                start = (page - 1) * per_req + 1
+                r = requests.get(
+                    'https://www.googleapis.com/customsearch/v1',
+                    params={
+                        'key': gcs_key,
+                        'cx': gcs_cx,
+                        'q': query,
+                        'searchType': 'image',
+                        'num': per_req,
+                        'start': start,
+                        'imgType': 'photo',
+                        'safe': 'active',
+                    },
+                    timeout=10,
+                )
+                print(f"Google CSE status: {r.status_code}")
+                if r.status_code == 200:
+                    items = r.json().get('items', [])
+                    images = [
+                        {
+                            'url': item['link'],
+                            'thumb': item.get('image', {}).get('thumbnailLink', item['link']),
+                            'alt': item.get('title', query),
+                            'author': item.get('displayLink', ''),
+                            'source': 'google',
+                        }
+                        for item in items if item.get('link')
+                    ]
+                    if images:
+                        return Response({'images': images, 'provider': 'google'})
+            except Exception as e:
+                print(f"Google CSE error: {e}")
 
         # ── 1. Pixabay ─────────────────────────────────────────────────────
         pixabay_key = PIXABAY_KEY or getattr(settings, 'PIXABAY_API_KEY', '')
