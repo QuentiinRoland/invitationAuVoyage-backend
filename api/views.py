@@ -4120,19 +4120,7 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
 
             flight = relevant_flights[0]
 
-            # Route manuelle sans numéro de vol → afficher message À compléter, pas de flight_data
-            if flight.get('source') == 'manual':
-                dep_city = flight.get('departure_city', '')
-                arr_city = flight.get('arrival_city', '')
-                route_str = f"{dep_city} → {arr_city}" if dep_city or arr_city else ''
-                section['body'] = (
-                    f"⚠️ Informations de vol à compléter\n\n"
-                    f"{route_str + chr(10) if route_str else ''}"
-                    f"Veuillez fournir le numéro de vol et la date pour obtenir les horaires exacts, "
-                    f"les terminaux et les éventuelles escales via Amadeus."
-                )
-                print(f"   ℹ️ Section '{section.get('title')}' : route manuelle sans horaires ({route_str})")
-                continue
+            # Vols manuels : on construit flight_data directement depuis les données saisies
 
             # Construire la structure flight_data propre pour le frontend
             stopovers = flight.get('stopovers', [])
