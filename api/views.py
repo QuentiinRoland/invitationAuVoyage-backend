@@ -3840,11 +3840,53 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                 intro = re.sub(r'(?i)(image\s*url|image:\s*|url\s*image)[^\s]*', '', intro)
                 offer_structure["introduction"] = intro.strip()
             
+            # ── Informations structurées du séjour (pour la fiche PDF) ────────
+            cabin_labels = {
+                'eco': 'Économique', 'premium_eco': 'Premium Éco', 'business': 'Business',
+                'premiere': 'Première', 'first': 'Première',
+            }
+            repas_labels = {
+                'demi-pension': 'Demi-pension', 'pension-complete': 'Pension complète',
+                'petit-dejeuner': 'Petit-déjeuner inclus', 'tout-inclus': 'Tout inclus',
+            }
+            transfert_labels = {
+                'prive': 'Privés', 'regroupe': 'Regroupés',
+            }
+
+            structured_flights = []
+            for f in real_flights_data:
+                structured_flights.append({
+                    'leg': f.get('leg', ''),
+                    'flight_number': f.get('flight_number', ''),
+                    'dep_city': f.get('departure_city', '') or f.get('departure_airport', ''),
+                    'arr_city': f.get('arrival_city', '') or f.get('arrival_airport', ''),
+                    'dep_airport': f.get('departure_airport', ''),
+                    'arr_airport': f.get('arrival_airport', ''),
+                    'dep_time': f.get('departure_time', ''),
+                    'arr_time': f.get('arrival_time', ''),
+                    'duration': f.get('duration', ''),
+                    'cabin': cabin_labels.get(f.get('cabin_class', 'eco'), f.get('cabin_class', 'Éco')),
+                    'airline_logo_url': f.get('airline_logo_url', ''),
+                    'arrival_day_offset': f.get('arrival_day_offset', 0),
+                })
+
+            structured_info = {
+                'destinations': destinations,
+                'dates': dates_texte,
+                'logements': logements,
+                'type_chambre': type_chambre,
+                'repas': repas_labels.get(repas, repas),
+                'transfert': transfert_labels.get(transfert_type, transfert_type),
+                'croisiere': croisiere,
+                'flights': structured_flights,
+            }
+
             return Response({
                 "offer_structure": offer_structure,
                 "company_info": company_info,
-                "metadata": metadata,  # ✅ Ajouter les métadonnées de traçabilité
-                "scraped_images": scraped_images[:10] if scraped_images else []  # ✅ Ajouter les images scrapées
+                "metadata": metadata,
+                "scraped_images": scraped_images[:10] if scraped_images else [],
+                "structured_info": structured_info,
             })
             
         except Exception as e:
@@ -4773,12 +4815,40 @@ class ImageSearchView(APIView):
             except Exception as e:
                 print(f"Freepik error: {e}")
 
-        # ── Aucun provider disponible ──────────────────────────────────────
-        return Response({
-            'images': [],
-            'provider': None,
-            'error': 'Aucun fournisseur d\'images configuré. Ajoutez PIXABAY_API_KEY dans .env (gratuit sur pixabay.com/api/docs)',
-        })
+        # ── 4. DuckDuckGo Images (sans clé, fallback universel) ────────────
+        try:
+            ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+            hdr = {'User-Agent': ua, 'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.7'}
+            # 1) Obtenir le token vqd
+            r0 = requests.get('https://duckduckgo.com/', params={'q': query}, headers=hdr, timeout=6)
+            vqd_match = re.search(r'vqd=(["\']?)([\d-]+)\1', r0.text)
+            if vqd_match:
+                vqd = vqd_match.group(2)
+                # 2) Appel API images DDG
+                r_img = requests.get(
+                    'https://duckduckgo.com/i.js',
+                    params={'l': 'fr-fr', 'o': 'json', 'q': query, 'vqd': vqd, 'f': ',,,', 'p': str(page)},
+                    headers=hdr,
+                    timeout=8,
+                )
+                if r_img.status_code == 200:
+                    results = r_img.json().get('results', [])
+                    images = [
+                        {
+                            'url': item['image'],
+                            'thumb': item.get('thumbnail', item['image']),
+                            'alt': item.get('title', query),
+                            'author': item.get('source', ''),
+                            'source': 'duckduckgo',
+                        }
+                        for item in results[:count] if item.get('image')
+                    ]
+                    if images:
+                        return Response({'images': images, 'provider': 'duckduckgo'})
+        except Exception as e:
+            print(f"DuckDuckGo images error: {e}")
+
+        return Response({'images': [], 'provider': None, 'error': 'Aucune image trouvée'})
 
 
 class WebSearchView(APIView):
