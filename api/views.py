@@ -216,6 +216,18 @@ class GrapesJSPDFGenerator(APIView):
             # IMPORTANT: on recompose un HTML complet imprimable
             printable_html = self.convert_grapesjs_to_printable_html(html_content, css_content, company_info)
 
+            # Debug : afficher un extrait pour vérifier @page et running elements
+            print(f"📄 PDF HTML length: {len(printable_html)}")
+            style_start = printable_html.find('<style>')
+            style_end = printable_html.find('</style>')
+            if style_start > -1 and style_end > -1:
+                style_block = printable_html[style_start:style_end+8]
+                print(f"📄 CSS block ({len(style_block)} chars):\n{style_block[:2000]}")
+            # Vérifier que les éléments running sont présents
+            print(f"📄 Has page-header: {'page-header' in printable_html}")
+            print(f"📄 Has page-footer: {'page-footer' in printable_html}")
+            print(f"📄 Has page-num: {'page-num' in printable_html}")
+
             # Génération PDF avec WeasyPrint (solution standard Django pour production)
             # Support complet HTML5/CSS3, rendu professionnel, rapide et stable
             pdf_bytes = HTML(string=printable_html).write_pdf()
@@ -251,18 +263,8 @@ class GrapesJSPDFGenerator(APIView):
     /* Reset & base */
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     
-    /* Configuration de la page pour WeasyPrint - MULTI-PAGES avec background */
-    @page {{
-      size: A4;
-      margin: 0 0 1.2cm 0;
-      @bottom-center {{
-        content: counter(page) " / " counter(pages);
-        font-size: 7pt;
-        color: #999;
-        font-family: Arial, Helvetica, sans-serif;
-        padding-bottom: 4mm;
-      }}
-    }}
+    /* @page par défaut — surchargé par le CSS client s'il en fournit un */
+    {'@page { size: A4; margin: 0 0 1.2cm 0; }' if '@page' not in clean_css else '/* @page fourni par le client */'}
     
     body {{
       font-family: Arial, Helvetica, sans-serif;
@@ -283,10 +285,27 @@ class GrapesJSPDFGenerator(APIView):
       display: none;
     }}
 
-    /* CSS GrapesJS nettoyé - Le background sera sur TOUTES les pages */
+    /* Defaults (avant le CSS client pour que le client puisse les surcharger) */
+    h1, h2, h3 {{
+      page-break-after: avoid;
+      page-break-inside: avoid;
+      margin-bottom: 6px;
+      margin-top: 8px;
+      clear: both;
+    }}
+    h1 {{ font-size: 16pt; margin-top: 0; line-height: 1.2; }}
+    h2 {{ font-size: 12pt; line-height: 1.2; }}
+    h3 {{ font-size: 10pt; line-height: 1.2; }}
+    p  {{ margin-bottom: 5px; line-height: 1.3; orphans: 2; widows: 2; }}
+    ul, ol {{ margin-bottom: 5px; padding-left: 20px; }}
+    li {{ margin-bottom: 2px; line-height: 1.3; }}
+    img {{ max-width: 100%; height: auto; display: block; page-break-inside: avoid; }}
+    * {{ max-width: 100%; word-wrap: break-word; overflow-wrap: break-word; }}
+
+    /* CSS client (GrapesJS / BlockNote) — surcharge les defaults ci-dessus */
     {clean_css}
 
-    /* Conteneur principal - padding pour descendre le texte sur TOUTES les pages */
+    /* Conteneur principal */
     .grapesjs-content {{
       width: 100%;
       overflow: visible;
@@ -300,76 +319,17 @@ class GrapesJSPDFGenerator(APIView):
       padding: 8px;
       border-radius: 3px;
     }}
-    
     .cta-section {{
       margin: 8px 0;
       padding: 10px;
       border-radius: 3px;
     }}
-    
     .offer-header {{
       margin-bottom: 10px;
       padding: 10px;
       border-radius: 3px;
     }}
-    
-    /* Titres compacts */
-    h1, h2, h3 {{ 
-      page-break-after: avoid;
-      page-break-inside: avoid;
-      margin-bottom: 6px;
-      margin-top: 8px;
-      clear: both;
-    }}
-    
-    h1 {{ 
-      font-size: 16pt;
-      margin-top: 0;
-      line-height: 1.2;
-    }}
-    h2 {{ 
-      font-size: 12pt;
-      line-height: 1.2;
-    }}
-    h3 {{ 
-      font-size: 10pt;
-      line-height: 1.2;
-    }}
-    
-    /* Paragraphes compacts */
-    p {{
-      margin-bottom: 5px;
-      line-height: 1.3;
-      orphans: 2;
-      widows: 2;
-    }}
-    
-    /* Images - compatible WeasyPrint */
-    img {{
-      max-width: 100%;
-      height: auto;
-      display: block;
-      page-break-inside: avoid;
-    }}
-    
-    /* Empêcher les débordements */
-    * {{
-      max-width: 100%;
-      word-wrap: break-word;
-      overflow-wrap: break-word;
-    }}
-    
-    /* Listes compactes */
-    ul, ol {{
-      margin-bottom: 5px;
-      padding-left: 20px;
-    }}
-    
-    li {{
-      margin-bottom: 2px;
-      line-height: 1.3;
-    }}
-    
+
     /* Footer compact */
     .footer {{
       margin-top: 15px;
@@ -1596,20 +1556,17 @@ class TravelOfferGenerator(APIView):
                 text_content = ' '.join(chunk for chunk in chunks if chunk)
                 
                 # Construire un résumé structuré pour ChatGPT
-                result = f"""🏨 RÉSULTATS DE RECHERCHE D'HÔTELS (PLUSIEURS OPTIONS DISPONIBLES)
+                result = f"""🏨 CONTENU SCRAPÉ DE LA PAGE HÔTEL/RECHERCHE (TEXTE BRUT)
 
-Cette page contient PLUSIEURS HÔTELS disponibles pour les dates recherchées. 
-ChatGPT doit analyser ces options et choisir le(s) meilleur(s) pour le circuit.
-
-📋 CONTENU EXTRAIT :
+📋 TEXTE EXTRAIT (à utiliser UNIQUEMENT en citation littérale) :
 {text_content[:5000]}
 
-💡 INSTRUCTIONS POUR CHATGPT :
-- Plusieurs hôtels sont listés ci-dessus avec leurs caractéristiques (nom, prix, étoiles, équipements, localisation, notes)
-- Analyse TOUTES les options disponibles
-- Choisis le(s) meilleur(s) hôtel(s) en fonction du rapport qualité/prix, localisation, services
-- Utilise les NOMS EXACTS, PRIX RÉELS, et DESCRIPTIONS EXACTES des hôtels mentionnés
-- Si plusieurs hôtels sont intéressants pour différentes étapes du circuit, tu peux les utiliser tous
+🚨 RÈGLES STRICTES — AUCUN MENSONGE :
+- Utilise UNIQUEMENT les noms, prix, étoiles, équipements, localisations qui apparaissent VERBATIM ci-dessus.
+- Si une information (équipement, prix, catégorie, adresse, services) n'est PAS présente dans le texte ci-dessus → NE PAS l'écrire.
+- Mieux vaut une description courte et factuelle que de longues phrases inventées.
+- N'utilise PAS tes connaissances générales sur l'hôtel pour combler des manques.
+- Ne synthétise PAS : recopie/reformule sans ajouter de détails.
 """
                 
                 if text_content and len(text_content.strip()) > 200:
@@ -2334,11 +2291,31 @@ EXIGENCES SPÉCIFIQUES CIRCUIT :
 - Vérifie que toutes les accolades {{ et }} sont bien fermées
 - Vérifie qu'il n'y a pas de virgule après le dernier élément d'un tableau ou objet"""
 
-    def _get_prompt_sejour(self, text_input, website_descriptions=None, example_templates=None, travel_date=None, return_date=None, real_time_search=None, real_flights_context=None, offer_type="sejour"):
+    def _get_prompt_sejour(self, text_input, website_descriptions=None, example_templates=None,
+                           travel_date=None, return_date=None, real_time_search=None,
+                           real_flights_context=None, offer_type="sejour",
+                           logements=None, type_chambre=None, repas_raw=None,
+                           transfert_raw=None, croisiere=None):
         """Prompt pour un Séjour (transport et/ou hôtel)"""
 
         # Détecter si le scraping a trouvé de vrais prix
         has_scraped_prices, price_snippets = self._detect_scraped_prices(website_descriptions)
+
+        # Inputs utilisateur (à intégrer VERBATIM dans les sections correspondantes)
+        repas_labels = {'demi-pension': 'Demi-pension', 'pension-complete': 'Pension complète',
+                        'petit-dejeuner': 'Petit-déjeuner inclus', 'tout-inclus': 'Tout inclus'}
+        transfert_labels = {'prive': 'Transfert privé', 'regroupe': 'Transfert regroupé'}
+        repas_label = repas_labels.get(repas_raw, repas_raw) if repas_raw else ''
+        transfert_label = transfert_labels.get(transfert_raw, transfert_raw) if transfert_raw else ''
+        logements_clean = [l.strip() for l in (logements or []) if l and l.strip()]
+        type_chambre_clean = (type_chambre or '').strip()
+        croisiere_clean = (croisiere or '').strip()
+
+        has_user_logement = bool(logements_clean)
+        has_user_chambre = bool(type_chambre_clean)
+        has_user_repas = bool(repas_label)
+        has_user_transfert = bool(transfert_label)
+        has_user_croisiere = bool(croisiere_clean)
 
         # Ajouter les descriptions des sites web si disponibles
         website_context = ""
@@ -2460,25 +2437,52 @@ EXIGENCES SPÉCIFIQUES CIRCUIT :
       "body": "Reprends EXACTEMENT les informations du VOL RETOUR de la section VOLS RÉELS. Numéro, compagnie, aéroports, horaires, durée, escales. N\\'invente rien."
     }''')
 
-        # Section Transferts — UNIQUEMENT si données scrapées le mentionnent
-        if has_transfer_info:
-            sections_json_parts.append('''    {
+        # Section Transferts — forcée si l'utilisateur a saisi un type de transfert
+        if has_user_transfert or has_transfer_info:
+            transfert_lines = []
+            if has_user_transfert:
+                transfert_lines.append(f"- Type de transfert : {transfert_label}")
+            if has_transfer_info:
+                transfert_lines.append("- [Détails (durée, prestataire, prise en charge) : 1 phrase VERBATIM du scraping. Si rien de précis, SUPPRIMER cette ligne — ne pas garder les crochets.]")
+            transfert_body = "\\n".join(transfert_lines)
+            sections_json_parts.append(f'''    {{
       "id": "transfers",
       "type": "Transfers",
       "title": "Transferts",
-      "body": "Reprends EXACTEMENT les informations de transferts trouvées dans les sites scrapés."
-    }''')
+      "body": "{transfert_body}"
+    }}''')
 
-        # Section Hébergement — UNIQUEMENT si texte ou sites scrapés le mentionnent
-        if has_hotel_info:
-            hotel_body = ("Nom, catégorie, localisation, équipements et prix de l\\'hôtel TELS QUE FOURNIS dans le contenu scrapé."
-                          if has_scraped_prices else
-                          "Nom, catégorie, localisation et équipements de l\\'hôtel tels que mentionnés. Prix : écrire exactement \\'Prix à confirmer avec l\\'agence.\\' Ne pas inventer de tarif.")
+        # Section Hébergement — forcée si l'utilisateur a saisi un logement / chambre / repas
+        if has_user_logement or has_user_chambre or has_user_repas or has_hotel_info:
+            hotel_lines = []
+            if has_user_logement:
+                hotel_lines.append(f"- Hôtel : {' ; '.join(logements_clean)}")
+            if has_user_chambre:
+                hotel_lines.append(f"- Type de chambre : {type_chambre_clean}")
+            if has_user_repas:
+                hotel_lines.append(f"- Repas : {repas_label}")
+            if has_hotel_info:
+                hotel_lines.append("- [Description courte de l hôtel — 1 à 2 phrases reprenant des FAITS PRÉSENTS VERBATIM dans le contenu scrapé. Si la source ne fournit aucun fait précis, SUPPRIMER cette ligne — ne pas garder les crochets ni inventer.]")
+                hotel_lines.append("- [Équipements (max 4) : uniquement ceux listés VERBATIM dans le scraping, séparés par des virgules. Si rien de précis, SUPPRIMER cette ligne.]")
+            if has_scraped_prices:
+                hotel_lines.append(f"- Prix : {price_snippets}")
+            else:
+                hotel_lines.append("- Prix : à confirmer avec l agence")
+            hotel_body = "\\n".join(hotel_lines)
             sections_json_parts.append(f'''    {{
       "id": "hotel",
       "type": "Hotel",
       "title": "Hébergement",
       "body": "{hotel_body}"
+    }}''')
+
+        # Section Croisière — forcée si l'utilisateur a saisi une croisière
+        if has_user_croisiere:
+            sections_json_parts.append(f'''    {{
+      "id": "croisiere",
+      "type": "Croisiere",
+      "title": "Croisière",
+      "body": "- Croisière : {croisiere_clean}\\n- [Détails (durée, escales, navire) : VERBATIM du scraping uniquement. Si rien de précis, SUPPRIMER cette ligne.]"
     }}''')
 
         # Section Services — UNIQUEMENT si données scrapées les mentionnent
@@ -2487,14 +2491,14 @@ EXIGENCES SPÉCIFIQUES CIRCUIT :
       "id": "services",
       "type": "Services",
       "title": "Services Inclus",
-      "body": "Reprends EXACTEMENT les services inclus mentionnés dans les sites scrapés."
+      "body": "Reprends EXACTEMENT les services inclus mentionnés dans les sites scrapés. Ne PAS inventer."
     }''')
 
         # Section Prix — UNIQUEMENT si prix réels scrapés ou hôtel présent
-        if has_scraped_prices or has_hotel_info:
+        if has_scraped_prices or has_user_logement or has_hotel_info:
             price_body = (f"Prix trouvés dans les données scrapées : {price_snippets}. Conditions si mentionnées."
                           if has_scraped_prices else
-                          "Prix du séjour : À confirmer avec l\\'agence. N\\'invente pas de montants.")
+                          "Prix du séjour : À confirmer avec l\\'agence. N\\'invente PAS de montants.")
             sections_json_parts.append(f'''    {{
       "id": "price",
       "type": "Price",
@@ -2517,6 +2521,26 @@ EXIGENCES SPÉCIFIQUES CIRCUIT :
 4. Pour les dates : utilise UNIQUEMENT les dates fournies. N'en invente pas.
 5. Pour tout champ sans données réelles : écrire "À confirmer" — JAMAIS inventer.
 6. Si l'utilisateur n'a mentionné que des vols (pas d'hôtel), la section Hébergement ne doit PAS apparaître.
+
+📌📌📌 OBLIGATION D'INTÉGRATION DES INPUTS UTILISATEUR :
+- Tous les champs saisis par le client DOIVENT apparaître dans le PDF.
+- Destinations + dates → titre/introduction.
+- Hôtel(s), type de chambre, repas → section Hébergement.
+- Type de transfert → section Transferts.
+- Croisière → section Croisière.
+- Vols (si fournis) → sections Vol Aller / Vol Retour.
+- Reprendre les valeurs LITTÉRALEMENT (verbatim) — ne pas paraphraser ni traduire.
+
+📐📐📐 FORMAT DES BODIES (LISTE À PUCES) :
+- Chaque "body" des sections Hébergement / Transferts / Croisière est déjà rédigé en liste à puces (lignes commençant par "- ").
+- TU DOIS reproduire chaque ligne EXACTEMENT, en conservant le tiret et l'espace au début, et en gardant un saut de ligne entre chaque puce.
+- Pour les lignes entre crochets [...] : remplacer par le contenu demandé (1-2 phrases factuelles VERBATIM du scraping). Si la source ne fournit AUCUN fait précis pour cette ligne, SUPPRIMER la ligne entière — ne JAMAIS conserver les crochets.
+- N'ajoute PAS de tableau, de pipes "|" séparateurs, ni de phrases narratives — uniquement la liste à puces.
+
+🛑🛑🛑 ANTI-MENSONGE HÔTEL :
+- Pour TOUT détail sur l'hôtel (étoiles, équipements, adresse, services, distance plage/aéroport, type de cuisine, …) : autorisé UNIQUEMENT si présent VERBATIM dans le contenu scrapé.
+- Si une donnée n'est PAS dans la source → ne PAS l'écrire. Mieux vaut 2 phrases vraies que 10 inventées.
+- Interdit absolu d'utiliser des connaissances générales sur l'hôtel/marque pour combler des manques.
 
 Format JSON strict — UNIQUEMENT ces sections, rien d'autre :
 {{
@@ -2795,6 +2819,9 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
 
     def post(self, request):
         text_input = request.data.get("text")
+        # Conserver le texte ORIGINAL saisi par le client (avant tout fallback construit)
+        # pour pouvoir l'injecter en section dédiée "Informations complémentaires".
+        user_extra_info = (text_input or "").strip()
         offer_type = request.data.get("offer_type", "sejour")
         flight_input = request.data.get("flight_input")  # legacy
         company_info = request.data.get("company_info", {})
@@ -2947,8 +2974,8 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                         'duration': fd.get("duration", ""),
                         'cabin_class': fd.get("cabin_class", "eco"),
                         'cabin_label': cabin_labels.get(fd.get("cabin_class", "eco"), "Économique"),
-                        'stops': 0,
-                        'stopovers': [],
+                        'stops': 1 if fd.get("stopover") else 0,
+                        'stopovers': [{'airport': fd["stopover"], 'city': fd["stopover"], 'layover_duration': fd.get("stopover_duration", "")}] if fd.get("stopover") else [],
                         'source': 'manual',
                         'leg': leg,
                         'not_found': False,
@@ -3300,6 +3327,14 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                     if airline and airline != 'N/A':
                         real_flights_context += f"Compagnie: {airline}\n"
 
+                    # Classe cabine (saisie par le client)
+                    cabin_label = flight.get('cabin_label')
+                    if not cabin_label:
+                        _cabin_map = {"eco": "Économique", "premium_eco": "Premium Économique", "business": "Business"}
+                        cabin_label = _cabin_map.get(flight.get('cabin_class', ''), '')
+                    if cabin_label:
+                        real_flights_context += f"Classe: {cabin_label}\n"
+
                     # Aéroports + villes + pays
                     dep_airport = flight.get('departure_airport', '')
                     arr_airport = flight.get('arrival_airport', '')
@@ -3476,7 +3511,15 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                 prompt = self._get_prompt_transport(text_input, website_descriptions, processed_templates, None, travel_date, return_date, real_flights_context, offer_type, keywords=keywords, outbound_cabin_class=outbound_cabin_class, return_cabin_class=return_cabin_class, outbound_escales=outbound_escales, return_escales=return_escales)
             else:
                 # "sejour" ou inconnu → prompt séjour (JAMAIS circuit automatique)
-                prompt = self._get_prompt_sejour(text_input, website_descriptions, processed_templates, travel_date, return_date, None, real_flights_context, offer_type)
+                prompt = self._get_prompt_sejour(
+                    text_input, website_descriptions, processed_templates,
+                    travel_date, return_date, None, real_flights_context, offer_type,
+                    logements=logements,
+                    type_chambre=type_chambre,
+                    repas_raw=repas,
+                    transfert_raw=transfert_type,
+                    croisiere=croisiere,
+                )
 
             # ── Contexte des nouveaux champs (v2) ─────────────────────────────
             structured_ctx = ""
@@ -3598,6 +3641,20 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                             "hint": "Le JSON généré par OpenAI contient des erreurs de format. Veuillez réessayer."
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
+            # ── Injecter section Informations complémentaires si user a saisi du texte ──
+            if user_extra_info and isinstance(offer_structure, dict):
+                sections = offer_structure.get('sections', [])
+                info_section = {
+                    'id': 'infos-complementaires',
+                    'type': 'Info',
+                    'title': 'Informations complémentaires',
+                    'body': user_extra_info,
+                    'images': [],
+                }
+                sections.append(info_section)
+                offer_structure['sections'] = sections
+                print(f"   ✅ Section Informations complémentaires injectée ({len(user_extra_info)} chars)")
+
             # ── Injecter section Formalités si fournie ────────────────────────
             if formalites and formalites.strip() and isinstance(offer_structure, dict):
                 sections = offer_structure.get('sections', [])
@@ -3612,6 +3669,83 @@ FORMAT JSON strict — réponds UNIQUEMENT avec ce JSON :
                 sections.append(formalites_section)
                 offer_structure['sections'] = sections
                 print(f"   ✅ Section Formalités injectée")
+
+            # ── Injecter section Informations complémentaires si fournie ────
+            if text_input and text_input.strip() and isinstance(offer_structure, dict):
+                # Ne pas injecter si c'est un texte auto-construit ("Destination(s) : …")
+                auto_prefix = ("Destination(s) :", "Demande de devis")
+                if not text_input.strip().startswith(auto_prefix):
+                    sections = offer_structure.get('sections', [])
+                    sections.append({
+                        'id': 'informations_complementaires',
+                        'type': 'Info',
+                        'title': 'Informations complémentaires',
+                        'body': text_input.strip(),
+                        'images': [],
+                    })
+                    offer_structure['sections'] = sections
+                    print(f"   ✅ Section Informations complémentaires injectée")
+
+            # ── Garde-fou : nettoyer les bodies (placeholders [...] non remplis) ──
+            # et garantir que les inputs utilisateur sont présents en bullet
+            if isinstance(offer_structure, dict) and offer_structure.get('sections'):
+                repas_labels_post = {'demi-pension': 'Demi-pension', 'pension-complete': 'Pension complète',
+                                     'petit-dejeuner': 'Petit-déjeuner inclus', 'tout-inclus': 'Tout inclus'}
+                transfert_labels_post = {'prive': 'Transfert privé', 'regroupe': 'Transfert regroupé'}
+                repas_label_post = repas_labels_post.get(repas, repas) if repas else ''
+                transfert_label_post = transfert_labels_post.get(transfert_type, transfert_type) if transfert_type else ''
+                logements_clean_post = [l.strip() for l in (logements or []) if l and l.strip()]
+
+                def _clean_body(body: str) -> str:
+                    if not body:
+                        return body
+                    # Retirer les lignes contenant un placeholder [...] non remplacé
+                    lines = []
+                    for line in body.split('\n'):
+                        # Ligne vide → conserver
+                        if not line.strip():
+                            lines.append(line)
+                            continue
+                        # Ligne avec placeholder non remplacé → drop
+                        if re.search(r'\[[^\]]{8,}\]', line):
+                            continue
+                        lines.append(line)
+                    return '\n'.join(lines).strip()
+
+                def _ensure_bullet(body: str, label: str, value: str) -> str:
+                    """Ajoute '- {label} : {value}' en tête si absent de body."""
+                    if not value:
+                        return body
+                    needle = value.strip().lower()
+                    if needle and needle in (body or '').lower():
+                        return body
+                    bullet = f"- {label} : {value}"
+                    return f"{bullet}\n{body}" if body else bullet
+
+                for sec in offer_structure['sections']:
+                    sec_type = (sec.get('type', '') or '').lower()
+                    sec_id = (sec.get('id', '') or '').lower()
+                    body = sec.get('body', '') or ''
+                    body = _clean_body(body)
+
+                    # Hôtel : garantir hôtel(s), type chambre, repas
+                    if sec_type == 'hotel' or sec_id == 'hotel':
+                        if logements_clean_post:
+                            body = _ensure_bullet(body, 'Hôtel', ' ; '.join(logements_clean_post))
+                        if type_chambre and type_chambre.strip():
+                            body = _ensure_bullet(body, 'Type de chambre', type_chambre.strip())
+                        if repas_label_post:
+                            body = _ensure_bullet(body, 'Repas', repas_label_post)
+                    # Transferts
+                    elif sec_type == 'transfers' or sec_id == 'transfers':
+                        if transfert_label_post:
+                            body = _ensure_bullet(body, 'Type de transfert', transfert_label_post)
+                    # Croisière
+                    elif sec_type == 'croisiere' or sec_id == 'croisiere':
+                        if croisiere and croisiere.strip():
+                            body = _ensure_bullet(body, 'Croisière', croisiere.strip())
+
+                    sec['body'] = body
 
             # Préparer les métadonnées de traçabilité
             airfrance_klm_used = search_metadata.get('source') == 'airfrance_klm'
@@ -4659,7 +4793,7 @@ class HotelGoogleSearchView(APIView):
 class ImageSearchView(APIView):
     """
     GET api/search-images/?q=<query>&count=<n>&page=<p>
-    Recherche d'images : Google CSE → Pixabay → Unsplash → Freepik (premier qui répond).
+    Recherche d'images via DuckDuckGo (package ddgs — gère vqd + bot detection).
     Retourne { images: [{url, thumb, alt, author, source}], provider, error? }
     """
     permission_classes = [AllowAny]
@@ -4671,172 +4805,36 @@ class ImageSearchView(APIView):
         if not query:
             return Response({'images': [], 'provider': None})
 
-        # ── 0. Google Custom Search ────────────────────────────────────────
-        gcs_key = GOOGLE_CSE_KEY or getattr(settings, 'GOOGLE_CSE_API_KEY', '')
-        gcs_cx  = GOOGLE_CSE_CX  or getattr(settings, 'GOOGLE_CSE_CX', '')
-        if gcs_key and gcs_cx:
-            try:
-                per_req = min(count, 10)  # Google CSE max 10 par requête
-                start = (page - 1) * per_req + 1
-                r = requests.get(
-                    'https://www.googleapis.com/customsearch/v1',
-                    params={
-                        'key': gcs_key,
-                        'cx': gcs_cx,
-                        'q': query,
-                        'searchType': 'image',
-                        'num': per_req,
-                        'start': start,
-                        'imgType': 'photo',
-                        'safe': 'active',
-                    },
-                    timeout=10,
-                )
-                print(f"Google CSE status: {r.status_code}")
-                if r.status_code == 200:
-                    items = r.json().get('items', [])
-                    images = [
-                        {
-                            'url': item['link'],
-                            'thumb': item.get('image', {}).get('thumbnailLink', item['link']),
-                            'alt': item.get('title', query),
-                            'author': item.get('displayLink', ''),
-                            'source': 'google',
-                        }
-                        for item in items if item.get('link')
-                    ]
-                    if images:
-                        return Response({'images': images, 'provider': 'google'})
-            except Exception as e:
-                print(f"Google CSE error: {e}")
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            return Response(
+                {'images': [], 'provider': None, 'error': "Package 'ddgs' non installé sur le serveur."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        # ── 1. Pixabay ─────────────────────────────────────────────────────
-        pixabay_key = PIXABAY_KEY or getattr(settings, 'PIXABAY_API_KEY', '')
-        if pixabay_key:
-            try:
-                r = requests.get(
-                    'https://pixabay.com/api/',
-                    params={
-                        'key': pixabay_key,
-                        'q': query,
-                        'image_type': 'photo',
-                        'orientation': 'horizontal',
-                        'safesearch': 'true',
-                        'per_page': count,
-                        'page': page,
-                        'order': 'popular',
-                    },
-                    timeout=10,
-                )
-                print(f"Pixabay status: {r.status_code}")
-                if r.status_code == 200:
-                    hits = r.json().get('hits', [])
-                    images = [
-                        {
-                            'url': h['webformatURL'],
-                            'thumb': h.get('previewURL', h['webformatURL']),
-                            'alt': h.get('tags', query),
-                            'author': h.get('user', ''),
-                            'source': 'pixabay',
-                        }
-                        for h in hits if h.get('webformatURL')
-                    ]
-                    if images:
-                        return Response({'images': images, 'provider': 'pixabay'})
-            except Exception as e:
-                print(f"Pixabay error: {e}")
-
-        # ── 2. Unsplash ────────────────────────────────────────────────────
-        unsplash_results = search_unsplash(query, per_page=count)
-        if unsplash_results:
+        try:
+            # ddgs gère pagination interne — on demande page * count puis on slice
+            max_results = count * page
+            with DDGS() as ddgs:
+                raw = list(ddgs.images(query, region='fr-fr', safesearch='moderate', max_results=max_results))
+            start = (page - 1) * count
+            sliced = raw[start:start + count]
             images = [
                 {
-                    'url': r['url'],
-                    'thumb': r.get('thumb', r['url']),
-                    'alt': query,
-                    'author': r.get('photographer', ''),
-                    'source': 'unsplash',
+                    'url': item.get('image', ''),
+                    'thumb': item.get('thumbnail') or item.get('image', ''),
+                    'alt': item.get('title', query),
+                    'author': item.get('source', ''),
+                    'source': 'duckduckgo',
                 }
-                for r in unsplash_results
+                for item in sliced if item.get('image')
             ]
-            return Response({'images': images, 'provider': 'unsplash'})
-
-        # ── 3. Freepik ─────────────────────────────────────────────────────
-        freepik_key = getattr(settings, 'FREEPIK_API_KEY', '')
-        if freepik_key:
-            try:
-                r = requests.get(
-                    'https://api.freepik.com/v1/resources',
-                    params={
-                        'term': query, 'page': 1, 'limit': count,
-                        'order': 'relevance',
-                        'filters[content_type][photo]': 1,
-                        'filters[orientation][landscape]': 1,
-                        'locale': 'en-US',
-                    },
-                    headers={'X-Freepik-API-Key': freepik_key},
-                    timeout=10,
-                )
-                print(f"Freepik status: {r.status_code}")
-                if r.status_code == 200:
-                    images = []
-                    for item in r.json().get('data', []):
-                        # Essayer plusieurs champs possibles pour l'URL
-                        url = (
-                            (item.get('preview') or {}).get('url') or
-                            (item.get('thumbnail') or {}).get('url') or
-                            item.get('url', '')
-                        )
-                        if url:
-                            images.append({
-                                'url': url,
-                                'thumb': url,
-                                'alt': item.get('title', query),
-                                'author': '',
-                                'source': 'freepik',
-                            })
-                    if images:
-                        return Response({'images': images, 'provider': 'freepik'})
-                    print(f"Freepik: 0 images dans la réponse")
-                else:
-                    print(f"Freepik error {r.status_code}: {r.text[:200]}")
-            except Exception as e:
-                print(f"Freepik error: {e}")
-
-        # ── 4. DuckDuckGo Images (sans clé, fallback universel) ────────────
-        try:
-            ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
-            hdr = {'User-Agent': ua, 'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.7'}
-            # 1) Obtenir le token vqd
-            r0 = requests.get('https://duckduckgo.com/', params={'q': query}, headers=hdr, timeout=6)
-            vqd_match = re.search(r'vqd=(["\']?)([\d-]+)\1', r0.text)
-            if vqd_match:
-                vqd = vqd_match.group(2)
-                # 2) Appel API images DDG
-                r_img = requests.get(
-                    'https://duckduckgo.com/i.js',
-                    params={'l': 'fr-fr', 'o': 'json', 'q': query, 'vqd': vqd, 'f': ',,,', 'p': str(page)},
-                    headers=hdr,
-                    timeout=8,
-                )
-                if r_img.status_code == 200:
-                    results = r_img.json().get('results', [])
-                    images = [
-                        {
-                            'url': item['image'],
-                            'thumb': item.get('thumbnail', item['image']),
-                            'alt': item.get('title', query),
-                            'author': item.get('source', ''),
-                            'source': 'duckduckgo',
-                        }
-                        for item in results[:count] if item.get('image')
-                    ]
-                    if images:
-                        return Response({'images': images, 'provider': 'duckduckgo'})
+            print(f"DuckDuckGo: {len(images)} image(s) pour '{query}' (page {page})")
+            return Response({'images': images, 'provider': 'duckduckgo'})
         except Exception as e:
-            print(f"DuckDuckGo images error: {e}")
-
-        return Response({'images': [], 'provider': None, 'error': 'Aucune image trouvée'})
+            print(f"DuckDuckGo error: {type(e).__name__}: {e}")
+            return Response({'images': [], 'provider': None, 'error': f"DuckDuckGo: {str(e)[:200]}"})
 
 
 class WebSearchView(APIView):
@@ -5089,7 +5087,7 @@ class PdfToGJSEndpoint(APIView):
                         print(f"⚠️ Erreur sauvegarde asset {i}: {ae}")
                         return i, None, None, None, 0
 
-                limited_assets = assets[:10]  # Max 10 images
+                limited_assets = assets[:50]  # Cap à 50 images max
                 url_map = {}
                 with ThreadPoolExecutor(max_workers=4) as pool:
                     results = list(pool.map(_save_asset, [(i, a, document.id) for i, a in enumerate(limited_assets)]))
@@ -5114,6 +5112,12 @@ class PdfToGJSEndpoint(APIView):
                     for img in section.get('images', []):
                         if isinstance(img, dict) and img.get('url') in url_map:
                             img['url'] = url_map[img['url']]
+                    # Propager aussi vers day_images (Programme : { 'Jour 1': [imgs], ... })
+                    day_images = section.get('day_images') or {}
+                    for day_key, imgs in day_images.items():
+                        for img in imgs:
+                            if isinstance(img, dict) and img.get('url') in url_map:
+                                img['url'] = url_map[img['url']]
 
                 # Sauvegarder offer_structure propre (URLs HTTP, pas data URLs)
                 document.offer_structure = offer_structure
@@ -5143,16 +5147,22 @@ class PdfToGJSEndpoint(APIView):
         """
         Retourne (markdown_consolidé, assets_base64[]).
 
-        Stratégie de détection des titres :
-          1. Collecter toutes les tailles de police du document
-          2. La taille la plus fréquente = corps du texte (body_size)
-          3. Seuils dérivés automatiquement :
-               ≥ body × 1.45  →  # H1   (titre principal)
-               ≥ body × 1.12  →  ## H2  (section)
-               gras + court   →  ### H3 (sous-titre)
-               sinon          →  paragraphe
-        Cette approche est indépendante des mots-clés et fonctionne quelle
-        que soit la langue ou le contenu du PDF.
+        Stratégie de détection des titres (volontairement CONSERVATRICE pour
+        ne pas convertir tout texte en gras en titre) :
+
+          1. body_size = taille de police la plus fréquente.
+          2. # H1  →  UNIQUEMENT la PREMIÈRE ligne dont la taille ≥ body × 1.30.
+                     C'est le titre du document (avec date éventuelle).
+          3. ## H2 →  UNIQUEMENT si la ligne est en gras ET contient un mot
+                     "jour/day/étape/nuit/semaine/lundi…/dimanche".
+          4. **gras** →  Lignes entièrement en gras, courtes (< 70 chars), et
+                     seules dans leur bloc PyMuPDF → préservées en markdown.
+                     Le parser décide ensuite si c'est une nouvelle section.
+          5. Reste  →  Paragraphe.
+
+        Continuité des paragraphes : fusion entre blocs PyMuPDF si l'écart
+        vertical < body × 1.4 (PyMuPDF découpe souvent un même paragraphe
+        en plusieurs blocs).
         """
         import collections as _col
         doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
@@ -5170,46 +5180,89 @@ class PdfToGJSEndpoint(APIView):
                             size_counter[round(span["size"], 1)] += 1
 
         body_size = size_counter.most_common(1)[0][0] if size_counter else 11.0
-        h1_min = body_size * 1.45
-        h2_min = body_size * 1.12
-        print(f"📐 Police: body={body_size}pt → H1≥{h1_min:.1f}pt, H2≥{h2_min:.1f}pt")
+        h1_min = body_size * 1.30
+        print(f"📐 Police: body={body_size}pt → H1≥{h1_min:.1f}pt (titre doc unique)")
+
+        # ── Phase 1.5 : détecter les lignes répétées (header/footer du PDF source) ──
+        # Une ligne qui apparaît sur ≥ 50% des pages (et au moins 2 pages) est probablement
+        # un en-tête/pied de page qui se répète et qu'on doit FILTRER pour ne pas
+        # qu'il pollue le body de chaque section.
+        line_occurrences = _col.Counter()
+        total_pages = len(doc)
+        for page in doc:
+            page_lines_set = set()
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    line_text = ""
+                    for span in line.get("spans", []):
+                        line_text += span.get("text", "")
+                    line_text = line_text.strip()
+                    # Lignes ni trop courtes (évite les chiffres seuls = numéros de page)
+                    # ni trop longues (évite des paragraphes qui se ressembleraient par hasard)
+                    if 6 <= len(line_text) <= 200:
+                        page_lines_set.add(line_text)
+            # On compte 1 occurrence par page (pas par bloc) pour éviter de surévaluer
+            for lt in page_lines_set:
+                line_occurrences[lt] += 1
+
+        # Seuil : ≥50% des pages, et au moins 2 pages
+        threshold = max(2, int(total_pages * 0.5))
+        repeated_lines = {lt for lt, n in line_occurrences.items() if n >= threshold}
+        # Filtrer les numéros purs ("Page 1/12", "1", "1/12") des lignes répétées (souvent OK à garder)
+        # En fait, mieux vaut tout filtrer ce qui se répète : ces lignes sont du chrome.
+        if repeated_lines:
+            print(f"🧹 {len(repeated_lines)} ligne(s) répétée(s) sur ≥{threshold}/{total_pages} pages — seront filtrées")
+            for lt in list(repeated_lines)[:5]:
+                print(f"   ↪ {lt[:80]!r}")
+
+        # ── Patterns de titres ──
+        DAY_RE = re.compile(
+            r'\b(jour|day|étape|etape|nuit|semaine)\s*\d+\b'
+            r'|^\s*\d+\s*(er|ère|ème|e|eme)?\s+jour\b'
+            r'|\b(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b',
+            re.I | re.UNICODE
+        )
+        _LIST_LINE_RE = re.compile(r'^([•·▪▸\-\*])\s|^\d+[\.\)]\s')
 
         # ── Phase 2 : extraction ligne par ligne avec marqueurs markdown ──
         page_chunks = []
+        title_found = False
 
         for page_num, page in enumerate(doc):
             lines_md = []
-            last_block_no = None
+            text_buffer = []   # accumulateur de paragraphe (peut traverser plusieurs blocs)
+            prev_y_end = None
+
+            def _flush_buffer():
+                if text_buffer:
+                    lines_md.append(" ".join(text_buffer))
+                    text_buffer.clear()
 
             for block in page.get_text("dict").get("blocks", []):
                 if block.get("type") != 0:
                     continue
 
-                # Ligne vide entre blocs pour préserver la structure paragraphe
-                bno = id(block)
-                if last_block_no is not None:
-                    lines_md.append("")
-                last_block_no = bno
+                bbox = block.get("bbox", (0, 0, 0, 0))
+                y_start, y_end = bbox[1], bbox[3]
+                block_lines = block.get("lines", [])
+                is_single_line_block = len(block_lines) == 1
 
-                # Les lignes normales du même bloc = même paragraphe → on les joint,
-                # SAUF si la ligne est un élément de liste (bullet/numérotée) ou
-                # si le buffer contenait déjà un item de liste.
-                # Les titres (H1/H2/H3) restent sur leur propre ligne.
-                text_buffer = []
+                # Saut de paragraphe entre 2 blocs UNIQUEMENT si gap vertical large
+                # (PyMuPDF découpe parfois un même paragraphe en plusieurs blocs)
+                if prev_y_end is not None:
+                    gap = y_start - prev_y_end
+                    if gap > body_size * 1.4:
+                        _flush_buffer()
+                        lines_md.append("")
 
-                _LIST_LINE_RE = re.compile(
-                    r'^([•·▪▸\-\*])\s|^\d+[\.\)]\s'
-                )
-
-                def _flush_buffer():
-                    if text_buffer:
-                        lines_md.append(" ".join(text_buffer))
-                        text_buffer.clear()
-
-                for line in block.get("lines", []):
+                for line in block_lines:
                     line_text = ""
                     max_size = 0.0
-                    is_bold = False
+                    all_text_bold = True
+                    has_text = False
+                    has_bold = False
 
                     for span in line.get("spans", []):
                         txt = span.get("text", "")
@@ -5219,40 +5272,64 @@ class PdfToGJSEndpoint(APIView):
                             max_size = sz
                         flags = span.get("flags", 0)
                         font = span.get("font", "").lower()
-                        if (flags & 16) or "bold" in font:
-                            is_bold = True
+                        is_span_bold = bool((flags & 16) or "bold" in font)
+                        if txt.strip():
+                            has_text = True
+                            if is_span_bold:
+                                has_bold = True
+                            else:
+                                all_text_bold = False
 
                     line_text = line_text.strip()
                     if not line_text:
                         continue
 
-                    if max_size >= h1_min:
+                    # Filtre header/footer du PDF source (lignes répétées sur plusieurs pages)
+                    if line_text in repeated_lines:
+                        continue
+
+                    # H1 — UNIQUEMENT la première ligne qui dépasse le seuil
+                    if not title_found and max_size >= h1_min:
                         _flush_buffer()
                         lines_md.append(f"# {line_text}")
-                    elif max_size >= h2_min:
+                        title_found = True
+                        continue
+
+                    # H2 — UNIQUEMENT si bold ET pattern jour/day/étape/jour de semaine
+                    if has_bold and DAY_RE.search(line_text) and len(line_text) <= 100:
                         _flush_buffer()
                         lines_md.append(f"## {line_text}")
-                    elif is_bold and len(line_text) <= 120:
-                        _flush_buffer()
-                        lines_md.append(f"### {line_text}")
-                    elif _LIST_LINE_RE.match(line_text):
-                        # Élément de liste : flush le buffer courant + émettre séparément
+                        continue
+
+                    # Liste explicite (•, -, *, 1., …)
+                    if _LIST_LINE_RE.match(line_text):
                         _flush_buffer()
                         lines_md.append(line_text)
-                    else:
-                        # Texte normal : accumuler pour former un paragraphe continu
-                        text_buffer.append(line_text)
+                        continue
 
-                _flush_buffer()
+                    # Ligne entièrement en gras, courte, seule dans son bloc
+                    # → préservée en **gras** (parser décide ensuite)
+                    if (has_text and all_text_bold and has_bold
+                            and len(line_text) <= 70 and is_single_line_block):
+                        _flush_buffer()
+                        lines_md.append(f"**{line_text}**")
+                        continue
 
+                    # Sinon — paragraphe (fusion across blocs gérée plus haut)
+                    text_buffer.append(line_text)
+
+                prev_y_end = y_end
+
+            _flush_buffer()
             if lines_md:
                 page_chunks.append("\n".join(lines_md))
 
-            # ── Extraction des images ──────────────────────────────────────
-            if len(assets) >= 10:
+            # ── Extraction des images (toutes les images du PDF, cap=50) ────
+            MAX_IMAGES = 50
+            if len(assets) >= MAX_IMAGES:
                 continue
             for img_index, img in enumerate(page.get_images(full=True)):
-                if len(assets) >= 10:
+                if len(assets) >= MAX_IMAGES:
                     break
                 pix = None
                 try:
@@ -5300,16 +5377,20 @@ class PdfToGJSEndpoint(APIView):
         'Info':       ['informations pratiques', 'infos pratiques', 'visa', 'assurance', 'formalité', 'documents requis', 'conditions'],
     }
 
-    # Mots-clés déclenchant une NOUVELLE SECTION quand en début de ligne courte (texte plat)
+    # Mots-clés déclenchant une NOUVELLE SECTION quand en début de ligne courte (texte plat).
+    # Accepte un qualifier court après le mot-clé (ex: "Programme détaillé", "Vols aller/retour").
     _SECTION_START_RE = re.compile(
-        r'^(programme|itinéraire|itinerary|agenda'
-        r'|vols?(\s+(aller|retour|inclus))?|flights?'
-        r'|hôtel|hotel|hébergement|logement'
-        r'|transferts?|navette'
+        r'^(programme|itinéraire|itineraire|itinerary|agenda'
+        r'|vols?(\s+(aller|retour|aller[\s\-]?retour|inclus))?|flights?'
+        r'|hôtels?|hotels?|hébergements?|hebergements?|logements?|resorts?'
+        r'|transferts?|navette|transport'
         r'|activités|activites|excursions?'
-        r'|prix|tarifs?|coûts?|forfait|budget'
-        r'|informations?\s+pratiques?|conditions?\s+générales?|formalités?'
-        r')\s*:?\s*$',
+        r'|prix|tarifs?|coûts?|forfait|budget|tarification'
+        r'|repas|restauration|pension'
+        r'|inclus|inclusions?|non[\s\-]?inclus|exclus|exclusions?'
+        r'|services?(\s+(inclus|disponibles?))?'
+        r'|informations?\s+(pratiques?|importantes?)|conditions?(\s+générales?)?|formalités?'
+        r')(\s+[\wÀ-ÿ\-\'/]{1,20}){0,3}\s*:?\s*$',
         re.I | re.UNICODE
     )
 
@@ -5442,8 +5523,14 @@ class PdfToGJSEndpoint(APIView):
                 if current is not None:
                     body_lines.append(f'## {m4.group(1)}')
             elif mb:
-                # Bold line → body ou intro (jamais une nouvelle section)
-                if current is not None:
+                # Ligne entièrement en gras (émise par l'extraction comme **texte**)
+                # → si elle ressemble à un en-tête de section (mot-clé connu ou
+                #   tout en majuscules court), on ouvre une nouvelle section.
+                # → sinon, c'est juste du texte en gras dans le body/intro.
+                bold_text = mb.group(1).strip()
+                if found_title and self._is_plain_section_heading(bold_text):
+                    new_section(bold_text.rstrip(':').strip())
+                elif current is not None:
                     body_lines.append(s)
                 elif found_title:
                     intro_lines.append(s)
@@ -5485,14 +5572,16 @@ class PdfToGJSEndpoint(APIView):
         }
 
     # ─────────────────────────────────────────────────────────────
-    # DISTRIBUTION DES IMAGES — une par section, sans doublons
+    # DISTRIBUTION DES IMAGES
+    # - Section "Programme" : 2-3 images par sous-titre "Jour X"
+    # - Autres sections : 1-2 images en fin de section
     # ─────────────────────────────────────────────────────────────
     def _distribute_images(self, offer_structure: dict, assets: list):
         """
-        Distribue TOUTES les images extraites du PDF (max 8) dans les sections.
-        - Passage 1 : 1 image par section (round-robin)
-        - Passage 2 : les images restantes vont dans les premières sections (max 2 par section)
-        Objectif : utiliser 4-5 images visibles minimum.
+        Distribue les images du PDF :
+        1. Repère chaque "### Jour/Day/Étape X" dans la section Programme
+           → assigne 2-3 images par jour (stockées dans section.day_images).
+        2. Distribue le reste : 1-2 images par autre section (Hôtel, Prix, etc.).
         """
         if not assets:
             return
@@ -5503,10 +5592,58 @@ class PdfToGJSEndpoint(APIView):
 
         pool = list(assets)
 
-        # Passage 1 : une image par section
+        # ── 1. Détection des "## Jour X" / "### Jour X" dans la section Programme
+        # NB: le parser émet les jours en "## " dans le body (qui devient H3 chez BlockNote).
+        DAY_HEADING_RE = re.compile(
+            r'^#{2,3}\s+(.*?(?:jour|day|étape|etape|nuit|semaine)\s*\d+.*?)\s*$'
+            r'|^#{2,3}\s+(\d+\s*(?:er|ère|ème|e|eme)?\s+jour.*?)\s*$'
+            r'|^#{2,3}\s+((?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche).*?)\s*$',
+            re.I | re.MULTILINE | re.UNICODE
+        )
+
+        for section in sections:
+            if section.get('type') != 'Programme':
+                continue
+            body = section.get('body', '') or ''
+            day_headings = []
+            for m in DAY_HEADING_RE.finditer(body):
+                heading = (m.group(1) or m.group(2) or m.group(3) or '').strip()
+                if heading:
+                    day_headings.append(heading)
+
+            if not day_headings:
+                continue
+
+            # 2-3 images par jour (selon disponibilité)
+            day_images = {}
+            for heading in day_headings:
+                if not pool:
+                    break
+                # On vise 3 si on a beaucoup d'images, sinon 2
+                target = 3 if len(pool) >= len(day_headings) * 3 else 2
+                imgs = []
+                for _ in range(target):
+                    if not pool:
+                        break
+                    asset = pool.pop(0)
+                    imgs.append({
+                        'url': asset['data_url'],
+                        'alt': asset.get('name', ''),
+                        'caption': '',
+                    })
+                day_images[heading] = imgs
+
+            section['day_images'] = day_images
+            print(f"🗓️ {len(day_images)} jour(s) reçu(s) "
+                  f"{sum(len(v) for v in day_images.values())} image(s) au total")
+
+        # ── 2. Reste du pool → autres sections (1-2 images chacune) ───────
+        # Passage 1 : une image par section qui n'en a pas encore
         for section in sections:
             if not pool:
                 break
+            if section.get('type') == 'Programme':
+                continue  # Programme déjà traité par day_images
             section.setdefault('images', [])
             if not section['images']:
                 asset = pool.pop(0)
@@ -5516,10 +5653,12 @@ class PdfToGJSEndpoint(APIView):
                     'caption': '',
                 })
 
-        # Passage 2 : distribuer les images restantes (max 2 par section au total)
+        # Passage 2 : 2e image pour les sections importantes
         for section in sections:
             if not pool:
                 break
+            if section.get('type') == 'Programme':
+                continue
             if len(section.get('images', [])) < 2:
                 asset = pool.pop(0)
                 section['images'].append({
@@ -5528,7 +5667,8 @@ class PdfToGJSEndpoint(APIView):
                     'caption': '',
                 })
 
-        print(f"🖼️ {len(assets) - len(pool)}/{len(assets)} images distribuées dans {len(sections)} sections")
+        print(f"🖼️ {len(assets) - len(pool)}/{len(assets)} images distribuées "
+              f"({len(sections)} section(s))")
 
     # ─────────────────────────────────────────────────────────────
     # FALLBACK OPENAI — structure seulement (~200 tokens, ~8s)

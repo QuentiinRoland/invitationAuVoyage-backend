@@ -30,6 +30,9 @@ pydyf==0.8.0
 beautifulsoup4==4.12.3
 lxml==5.3.0
 
+# Recherche d'images DuckDuckGo
+ddgs>=9.0.0
+
 # Scraping JavaScript (navigateur headless)
 playwright==1.47.0
 
